@@ -1,0 +1,10 @@
+{
+  "name": "georates-price-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless endpoint that tries to read the total price of a Booking.com hotel page for GeoRates. Best-effort automation - falls back to manual check when Booking.com blocks the request.",
+  "dependencies": {
+    "@sparticuz/chromium": "^123.0.1",
+    "puppeteer-core": "^22.6.3"
+  }
+}
