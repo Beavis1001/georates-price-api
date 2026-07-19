@@ -1,32 +1,67 @@
 # georates-price-api
 
-Kostenloser Serverless-Endpunkt, der versucht, den Gesamtpreis einer Booking.com-Seite fuer
-gegebene Reisedaten automatisch auszulesen (Headless-Chrome-Rendering). Wird von georates.tech
-per fetch() aufgerufen. Schlaegt die automatische Pruefung fehl (Bot-Schutz, geaenderte
-Seitenstruktur etc.), faellt die Website automatisch auf die manuelle Pruefung per E-Mail zurueck.
+Serverless-Endpunkt fuer den GeoRates Geo-Preisvergleich: prueft den Preis eines konkreten
+Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet zurueck,
+ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt. Portiert die bereits gehaertete
+Parsing-Logik aus dem lokalen `hotel_compare.py`-Skript.
 
-## Deployment (kostenlos, ca. 10 Minuten)
+## Ablauf pro Anfrage
 
-1. Auf vercel.com mit GitHub-Account registrieren (kostenloser "Hobby"-Plan reicht).
-2. Neues GitHub-Repo anlegen, z. B. `georates-price-api` (wie bei georates: leeres Repo,
-   dann diese drei Dateien ueber "Add file -> Upload files" hochladen: `package.json`,
-   `vercel.json`, `api/check-price.js`).
-3. In Vercel: "Add New..." -> "Project" -> das eben erstellte GitHub-Repo importieren.
-   Framework Preset: "Other" lassen, Root Directory: `.` (Standard). Deploy klicken.
-4. Nach dem Deploy zeigt Vercel eine URL wie `https://georates-price-api.vercel.app`.
-   Die Funktion ist erreichbar unter `https://georates-price-api.vercel.app/api/check-price`.
-5. Diese URL mir schicken, dann trage ich sie im Frontend (`index.html`, Konstante
-   `PRICE_API_URL`) ein und deploye georates.tech neu.
+1. Cloudflare-Turnstile-Token pruefen (Bot-Schutz).
+2. Cache pruefen (Upstash Redis, 24h) - bei Treffer sofort Antwort ohne Proxy-Traffic.
+3. Schnelle Probe: Deutschland + Kolumbien parallel.
+4. Zeigt die Probe keine klare Ersparnis (>= 3%), werden weitere Laender NACHEINANDER
+   geprueft (Bilder/Fonts/Stylesheets werden dabei geblockt, um Traffic zu sparen) - begrenzt
+   durch ein Zeitbudget (45s), damit die Funktion nicht am Vercel-Zeitlimit scheitert. Wird das
+   Budget aufgebraucht, kommt die Antwort mit den bis dahin geprueften Laendern plus
+   `partial: true` zurueck.
+5. Ergebnis wird gecacht (24h) und zurueckgegeben.
 
-## Bekannte Grenzen (bewusst so gebaut, kein Bug)
+Wechselkurse werden bei jeder (nicht gecachten) Anfrage live abgerufen (open.er-api.com,
+kostenlos, kein Key noetig) - faellt die Abfrage aus, springt ein statischer Notfall-Kurs ein.
 
-- Booking.com blockt Bot-Traffic teils komplett (Cloudflare-Schutz) - dann liefert die
-  Funktion `{ success: false, reason: "blocked_or_timeout" }` zurueck, die Website faellt
-  automatisch auf die manuelle E-Mail-Pruefung zurueck.
-- Die Preis-Selektoren in `check-price.js` koennen brechen, wenn Booking.com sein Frontend
-  aendert - gleiches Fallback-Verhalten.
-- Vercels kostenloser Plan begrenzt die Ausfuehrungszeit pro Funktionsaufruf. Falls Deploys
-  wegen `maxDuration` in `vercel.json` fehlschlagen, den Wert dort auf 10 senken.
-- Der Endpunkt liest den allgemein auf der Seite angezeigten (meist guenstigsten) Preis fuer
-  die uebergebenen Daten aus, prueft aber nicht automatisch, ob es exakt das vom Kunden
-  gewuenschte Zimmer/die Verpflegung ist - das bleibt Teil der manuellen Endkontrolle.
+## Benoetigte Umgebungsvariablen (Vercel -> Project -> Settings -> Environment Variables)
+
+Zugangsdaten stehen bewusst NICHT im Code (dieses Repo ist oeffentlich):
+
+- `SMARTPROXY_USER_PREFIX` - z. B. `smart-ut1nl7crifne_area-` (Laender-Code wird automatisch angehaengt)
+- `SMARTPROXY_PASSWORD` - das Proxy-Passwort
+- `SMARTPROXY_SERVER` - optional, Default `http://proxy.smartproxy.net:3120`
+- `TURNSTILE_SECRET_KEY` - Cloudflare-Turnstile Secret Key (Bot-Schutz). Ohne diese Variable
+  wird der Bot-Check uebersprungen - vor Live-Betrieb setzen, sonst kann jeder beliebig oft
+  die kostenpflichtigen Proxy-Anfragen ausloesen.
+- `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` - optional, aber empfohlen (Cache).
+  Ohne diese Variablen funktioniert alles, nur ohne Cache - jede Anfrage kostet dann volle
+  Proxy-Zeit, auch bei identischen Wiederholungen.
+
+## Deployment
+
+1. Auf vercel.com mit GitHub-Account registrieren (kostenloser "Hobby"-Plan).
+2. "Add New..." -> "Project" -> dieses Repo (`georates-price-api`) importieren.
+3. Vor dem ersten Deploy die Umgebungsvariablen oben eintragen.
+4. Deploy klicken. Die Funktion ist danach erreichbar unter
+   `https://<projekt>.vercel.app/api/check-price`.
+
+## Cloudflare Turnstile einrichten (kostenlos, Bot-Schutz)
+
+1. dash.cloudflare.com -> kostenlos registrieren.
+2. Turnstile -> "Add Site" -> Domain `georates.tech` eintragen, Widget-Typ "Managed".
+3. Site Key (fuer die Website, Frontend) und Secret Key (fuer diese Funktion, als
+   `TURNSTILE_SECRET_KEY` in Vercel) kopieren.
+
+## Upstash Redis einrichten (kostenlos, Cache)
+
+1. upstash.com -> kostenlos registrieren (GitHub-Login moeglich).
+2. "Create Database" -> Name frei waehlbar, Region moeglichst nah an Vercel-Region waehlen.
+3. Im Datenbank-Dashboard unter "REST API" die Werte `UPSTASH_REDIS_REST_URL` und
+   `UPSTASH_REDIS_REST_TOKEN` kopieren, in Vercel eintragen.
+
+## Bekannte Grenzen
+
+- Die Erweiterung auf weitere Laender ist zeitbudgetiert (45s) - bei sehr langsamen
+  Proxy-Antworten werden ggf. nicht alle 14 zusaetzlichen Laender erreicht, dann kommt
+  `partial: true` in der Antwort zurueck statt eines vollstaendigen Scans.
+- Booking.com kann Proxy-Traffic trotzdem blocken/CAPTCHA zeigen - dann liefert die Funktion
+  fuer das betroffene Land keinen Preis, andere Laender koennen trotzdem erfolgreich sein.
+- Ohne Upstash-Variablen läuft alles, aber ohne Cache (jede Anfrage verbraucht volle
+  Proxy-Zeit/-Kosten, auch bei Wiederholungen derselben Suche).
