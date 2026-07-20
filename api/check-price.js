@@ -206,6 +206,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     await browser.close();
     return { bodyText, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
   } catch (err) {
+    console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
     return { bodyText: null, loadedOk: false, err };
   }
@@ -376,6 +377,8 @@ module.exports = async (req, res) => {
     let results = await Promise.all(
       PROBE_COUNTRIES.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates))
     );
+
+    console.log('[check-price] Probe-Ergebnis:', JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
     let summary = summarize(results);
     let partial = false;
