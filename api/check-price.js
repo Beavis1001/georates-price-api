@@ -161,6 +161,17 @@ function extractExclusiveTaxPct(context) {
   return pctValues.reduce((a, b) => a + b, 0);
 }
 
+// Manche Laender zeigen den Zimmerpreis OHNE Steuern und weisen sie als ABSOLUTEN Betrag aus:
+// "plus EGP 954 Steuern und Gebühren" (statt "Einschließlich Steuern und Gebühren"). Fuer einen
+// FAIREN Vergleich (Deutschland zeigt inkl.) muss dieser Betrag aufaddiert werden. Gibt den
+// zusaetzlichen Steuerbetrag in Landeswaehrung zurueck, oder null (Preis ist bereits inklusive).
+const ABS_EXTRA_TAX_RE = /(?:plus|zzgl\.?|zuz(?:ü|ue)glich|\+)\s+[^\d\s]{0,4}\s*([\d][\d.,]*)\s+steuern?\s+und\s+geb/i;
+function extractAbsoluteExtraTax(context) {
+  const m = ABS_EXTRA_TAX_RE.exec(context || '');
+  if (!m) return null;
+  return parseAmount(m[1]);
+}
+
 function looksLikeNewRoomHeading(lines, idx) {
   if (idx >= lines.length || lines[idx].length > 60) return false;
   for (let j = idx + 1; j < Math.min(idx + 1 + ROOM_CARD_LOOKAHEAD, lines.length); j++) {
@@ -340,9 +351,13 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   if (rawAmt) {
     let val = parseAmount(rawAmt);
     const taxPct = extractExclusiveTaxPct(ctx);
+    const absExtra = extractAbsoluteExtraTax(ctx);
     if (val !== null && taxPct !== null) {
       val = Math.round(val * (1 + taxPct / 100) * 100) / 100;
-      result.priceRaw = `${rawAmt} (${currency}, zzgl. ${taxPct}% Steuer -> steuerinkl. korrigiert: ${val})`;
+      result.priceRaw = `${rawAmt} (${currency}, zzgl. ${taxPct}% Steuer -> steuerinkl.: ${val})`;
+    } else if (val !== null && absExtra !== null) {
+      val = Math.round((val + absExtra) * 100) / 100;
+      result.priceRaw = `${rawAmt} (${currency}, zzgl. ${absExtra} ${currency} Steuern -> steuerinkl.: ${val})`;
     } else {
       result.priceRaw = `${rawAmt} (${currency}, inkl. Steuern & Gebühren)`;
     }
@@ -428,18 +443,17 @@ function summarize(results, baselineCountry) {
 // Nutzt dieselbe Heuristik wie die Zimmererkennung: eine Zeile ist eine Zimmer-Ueberschrift,
 // wenn kurz danach eine Flaechenangabe ("... m²") folgt.
 const BED_RE = /doppelbett|einzelbett|zweibett|etagenbett|schlafsofa|schlafcouch|\bbett\b|\bbetten\b/i;
-// Zeilen, die KEIN Zimmername sein koennen (Amenity-/Preis-/Options-Zeilen).
-const NOT_ROOM_RE = /m²|€|\beur\b|inbegriffen|stornier|steuern|geb(ü|ue)hren|^preis\b|^gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verfügbar/i;
+// Zeilen, die KEIN Zimmername sein koennen (Verfuegbarkeits-, Preis-, Belegungs-, Options-Zeilen).
+const NOT_ROOM_RE = /m²|€|\$|\beur\b|usd|egp|cop|thb|inr|ars|try|lkr|vnd|idr|pkr|pen|mxn|php|jpy|inbegriffen|stornier|steuern|geb(ü|ue)hren|preis|gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verf(ü|ue)gbar|wir haben noch|nur noch|belegung|erwachsen|g(ä|ae)ste|online/i;
 
-// Ein Zimmername ist eine kurze, "saubere" Zeile, die DIREKT von einer Bett-Angabe gefolgt wird
-// (z.B. "Deluxe King" -> "1 französisches Doppelbett"). Das ist ein deutlich verlaesslicheres
-// Signal als die Flaechenangabe "m²", die oft erst viele Zeilen spaeter kommt.
+// Ein Zimmername ist eine kurze, "saubere" Zeile, die kurz darauf von einer Bett-Angabe gefolgt
+// wird (z.B. "Einzelzimmer" -> "Wir haben noch 3" -> "1 Einzelbett"). Deutlich verlaesslicher als
+// die Flaechenangabe "m²", die oft erst viele Zeilen spaeter kommt.
 function isRoomName(lines, idx) {
   const l = lines[idx] || '';
   if (l.length < 3 || l.length > 55) return false;
   if (NOT_ROOM_RE.test(l)) return false;
-  if (/\d/.test(l) && BED_RE.test(l)) return false; // Bett-Zeile selbst ist kein Name
-  for (let j = idx + 1; j <= Math.min(idx + 2, lines.length - 1); j++) {
+  for (let j = idx + 1; j <= Math.min(idx + 4, lines.length - 1); j++) {
     if (BED_RE.test(lines[j])) return true;
   }
   return false;
