@@ -443,20 +443,22 @@ function summarize(results, baselineCountry) {
 // Nutzt dieselbe Heuristik wie die Zimmererkennung: eine Zeile ist eine Zimmer-Ueberschrift,
 // wenn kurz danach eine Flaechenangabe ("... m²") folgt.
 const BED_RE = /doppelbett|einzelbett|zweibett|etagenbett|schlafsofa|schlafcouch|\bbett\b|\bbetten\b/i;
+// Ein echter Zimmername enthaelt praktisch immer ein Unterkunfts-/Zimmertyp-Wort. Das ist ein viel
+// verlaesslicheres Signal als "steht neben einer Bett-Angabe" (dort landete sonst Ausstattung wie
+// "Ventilator" oder "Schrank", weil die Ausstattungsliste direkt neben den Betten steht).
+const ROOM_TYPE_RE = /(zimmer\b|\broom\b|suite|studio|apartment|appartement|bungalow|villa|chalet|cottage|penthouse|maisonette|schlafsaal|mehrbett|\bloft\b|\bzelt\b|\bcabin\b|\bdorm\b|deluxe|superior|standard|komfort|classic|\bking\b|\bqueen\b|\bdouble\b|\btwin\b|\bsingle\b)/i;
 // Zeilen, die KEIN Zimmername sein koennen (Verfuegbarkeits-, Preis-, Belegungs-, Options-Zeilen).
-const NOT_ROOM_RE = /m²|€|\$|\beur\b|usd|egp|cop|thb|inr|ars|try|lkr|vnd|idr|pkr|pen|mxn|php|jpy|inbegriffen|stornier|steuern|geb(ü|ue)hren|preis|gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verf(ü|ue)gbar|wir haben noch|nur noch|belegung|erwachsen|g(ä|ae)ste|online/i;
+const NOT_ROOM_RE = /m²|€|\$|\beur\b|usd|egp|cop|thb|inr|ars|try|lkr|vnd|idr|pkr|pen|mxn|php|jpy|inbegriffen|stornier|steuern|geb(ü|ue)hren|preis|gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verf(ü|ue)gbar|wir haben noch|nur noch|belegung|erwachsen|g(ä|ae)ste|online|anzahl|abreise|anreise/i;
 
-// Ein Zimmername ist eine kurze, "saubere" Zeile, die kurz darauf von einer Bett-Angabe gefolgt
-// wird (z.B. "Einzelzimmer" -> "Wir haben noch 3" -> "1 Einzelbett"). Deutlich verlaesslicher als
-// die Flaechenangabe "m²", die oft erst viele Zeilen spaeter kommt.
 function isRoomName(lines, idx) {
-  const l = lines[idx] || '';
+  const l = (lines[idx] || '').trim();
   if (l.length < 3 || l.length > 55) return false;
+  if (l.includes(':')) return false;                 // "Schlafzimmer 1: ...", "Bis 12:00"
+  if (/^\d/.test(l)) return false;                   // "1 Schlafsofa", "2 Einzelbetten und"
+  if (!ROOM_TYPE_RE.test(l)) return false;           // muss ein Zimmertyp-Wort enthalten
   if (NOT_ROOM_RE.test(l)) return false;
-  for (let j = idx + 1; j <= Math.min(idx + 4, lines.length - 1); j++) {
-    if (BED_RE.test(lines[j])) return true;
-  }
-  return false;
+  if (/\d/.test(l) && BED_RE.test(l)) return false;  // Bett-Angabe, kein Name
+  return true;
 }
 
 function listRooms(bodyText) {
