@@ -35,7 +35,9 @@ const DEFAULT_BASELINE_COUNTRY = 'DE';
 // Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
 // Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
-const MAX_ATTEMPTS = 2;
+const MAX_ATTEMPTS = 2;          // Versuche fuer Ausgangsland + Kolumbien (Genauigkeit wichtig)
+const EXPANSION_ATTEMPTS = 1;    // Versuche fuer die zusaetzlichen Laender (Tempo wichtig)
+const BATCH_SIZE = 3;            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
 const MIN_LOADED_LINES = 300;
 const TIME_BUDGET_MS = 50000; // Sicherheitsmarge unter maxDuration (60s) in vercel.json
 const CACHE_TTL_SECONDS = 24 * 3600;
@@ -234,11 +236,11 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
       else req.continue();
     });
 
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
     for (const sel of ["button ::-p-text('Alle akzeptieren')", '#onetrust-accept-btn-handler']) {
       try {
-        await page.click(sel, { timeout: 2000 });
+        await page.click(sel, { timeout: 1500 });
         break;
       } catch (e) { /* kein Banner - ignorieren */ }
     }
@@ -246,10 +248,10 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     try {
       await page.waitForFunction(
         () => /Zimmerkategorie|Preis für/i.test(document.body.innerText),
-        { timeout: 18000 }
+        { timeout: 12000 }
       );
     } catch (e) {
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 2000));
     }
 
     try {
@@ -267,7 +269,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
   }
 }
 
-async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, rates) {
+async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, rates, maxAttempts) {
+  const attempts = maxAttempts || MAX_ATTEMPTS;
+  const t0 = Date.now();
   const proxyAuth = { username: `${userPrefix}${countryCode}`, password };
   const expectedCurrency = DEFAULT_CURRENCY_BY_COUNTRY[countryCode];
   const result = { country: countryCode, priceRaw: null, currency: null, priceEuro: null };
@@ -276,7 +280,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   let loadedOk = false;
   let lastErr = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     const r = await attemptFetch(targetUrl, proxyServer, proxyAuth);
     bodyText = r.bodyText;
     loadedOk = r.loadedOk;
@@ -287,6 +291,8 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     }
     if (loadedOk) break;
   }
+
+  console.log(`[fetchPrice] ${countryCode}: ${loadedOk ? 'ok' : 'kein Preis'} nach ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
   if (!loadedOk) {
     result.priceRaw = lastErr ? `Fehler: ${lastErr.message || lastErr}` : 'Seite nicht vollständig geladen (Proxy-Exit instabil)';
@@ -434,20 +440,20 @@ module.exports = async (req, res) => {
       return;
     }
 
+    // Chromium EINMAL vorab entpacken. Danach koennen mehrere Browser gefahrlos gleichzeitig
+    // starten (kein spawn ETXTBSY / libnss3.so-Race mehr) - so laeuft auch die Probe parallel.
+    try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
+
     // Ausgangsland (Referenzpreis) aus dem Booking-Link ableiten - nicht zwingend Deutschland.
     const baselineCountry = detectBaselineCountry(link);
 
-    // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien), NACHEINANDER (nicht parallel!). Der
-    // erste Aufruf entpackt das Chromium-Paket samt Shared Libraries vollstaendig nach /tmp;
-    // wuerden mehrere Browser gleichzeitig starten, kollidiert das Entpacken (spawn ETXTBSY /
-    // libnss3.so fehlt). Ab dem zweiten Aufruf ist Chromium bereits entpackt.
+    // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien) PARALLEL, je 2 Versuche (Genauigkeit).
     const probeCountries = [baselineCountry];
     if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
 
-    let results = [];
-    for (const c of probeCountries) {
-      results.push(await fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates));
-    }
+    let results = await Promise.all(
+      probeCountries.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates, MAX_ATTEMPTS))
+    );
 
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
@@ -466,16 +472,15 @@ module.exports = async (req, res) => {
     }
 
     if (!probeConclusive) {
-      // Die restlichen Laender in kleinen PARALLELEN Gruppen pruefen (nicht einzeln
-      // nacheinander - das dauerte fast 60s). Chromium ist nach der Probe bereits entpackt,
-      // daher ist Parallelitaet jetzt gefahrlos; die Gruppengroesse begrenzt den Arbeitsspeicher.
+      // Die restlichen Laender in PARALLELEN Gruppen pruefen (je 1 Versuch, damit's schnell
+      // bleibt). Chromium ist bereits entpackt, daher ist Parallelitaet gefahrlos; die
+      // Gruppengroesse begrenzt den Arbeitsspeicher. Zeitbudget stoppt vor dem Vercel-Limit.
       const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
-      const BATCH_SIZE = 2;
       for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
         if (Date.now() - startTime > TIME_BUDGET_MS) { partial = true; break; }
         const batch = remaining.slice(i, i + BATCH_SIZE);
         const batchResults = await Promise.all(
-          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates))
+          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates, EXPANSION_ATTEMPTS))
         );
         results.push(...batchResults);
       }
