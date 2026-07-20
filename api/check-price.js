@@ -15,8 +15,14 @@
 //      die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
 
 const crypto = require('crypto');
-const chromium = require('@sparticuz/chromium');
+const chromium = require('@sparticuz/chromium-min');
 const puppeteer = require('puppeteer-core');
+
+// Vollstaendiges Chromium-Paket (inkl. Shared Libraries wie libnss3.so) wird zur Laufzeit
+// aus dem passenden GitHub-Release geladen. So entfaellt das fragile Mitbundeln der Libs
+// durch Vercel, das zuvor den Fehler "libnss3.so: cannot open shared object file" ausloeste.
+const CHROMIUM_PACK_URL =
+  'https://github.com/Sparticuz/chromium/releases/download/v123.0.1/chromium-v123.0.1-pack.tar';
 
 // ---- Konfiguration -----------------------------------------------------------------------
 
@@ -163,7 +169,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     browser = await puppeteer.launch({
       args: [...chromium.args, `--proxy-server=${proxyServer}`],
       defaultViewport: { width: 1280, height: 900 },
-      executablePath: await chromium.executablePath(),
+      executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
       headless: chromium.headless,
     });
     const page = await browser.newPage();
