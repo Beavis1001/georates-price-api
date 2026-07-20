@@ -22,7 +22,7 @@ const puppeteer = require('puppeteer-core');
 // aus dem passenden GitHub-Release geladen. So entfaellt das fragile Mitbundeln der Libs
 // durch Vercel, das zuvor den Fehler "libnss3.so: cannot open shared object file" ausloeste.
 const CHROMIUM_PACK_URL =
-  'https://github.com/Sparticuz/chromium/releases/download/v123.0.1/chromium-v123.0.1-pack.tar';
+  'https://github.com/Sparticuz/chromium/releases/download/v148.0.0/chromium-v148.0.0-pack.x64.tar';
 
 // ---- Konfiguration -----------------------------------------------------------------------
 
