@@ -30,7 +30,9 @@ const CHROMIUM_PACK_URL =
 // bei der Erweiterung: erfahrungsgemaess guenstige Laender (schwache Waehrung/hohe Inflation)
 // zuerst, damit ein evtl. durch das Zeitlimit gekuerztes Ergebnis trotzdem die relevanten
 // Kandidaten enthaelt. Teure Maerkte (USA, Japan) ganz am Ende.
-const ALL_COUNTRIES = ['DE', 'CO', 'TR', 'AR', 'EG', 'IN', 'VN', 'ID', 'PK', 'LK', 'PE', 'MX', 'PH', 'TH', 'US', 'JP'];
+// Hinweis: Tuerkei (TR) bewusst NICHT enthalten - von dort sind aktuell keine internationalen
+// Buchungen moeglich, daher waere eine Abfrage nur verschwendeter Proxy-Traffic.
+const ALL_COUNTRIES = ['DE', 'CO', 'AR', 'EG', 'IN', 'VN', 'ID', 'PK', 'LK', 'PE', 'MX', 'PH', 'TH', 'US', 'JP'];
 // "Guenstig-Kandidat" fuer die schnelle Probe (neben dem Ausgangsland).
 const CHEAP_PROBE_COUNTRY = 'CO';
 // Ausgangsland (Referenzpreis), falls es sich nicht aus dem Link ableiten laesst.
@@ -63,7 +65,7 @@ const LANG_TO_BASELINE_COUNTRY = {
   de: 'DE', 'de-de': 'DE', 'de-at': 'DE', 'de-ch': 'DE',
   'en-us': 'US',
   'es-co': 'CO', 'es-ar': 'AR', 'es-mx': 'MX', 'es-pe': 'PE',
-  th: 'TH', hi: 'IN', ar: 'EG', tr: 'TR',
+  th: 'TH', hi: 'IN', ar: 'EG',
   vi: 'VN', id: 'ID', ja: 'JP',
 };
 
@@ -282,7 +284,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   const t0 = Date.now();
   const proxyAuth = { username: `${userPrefix}${countryCode}`, password };
   const expectedCurrency = DEFAULT_CURRENCY_BY_COUNTRY[countryCode];
-  const result = { country: countryCode, priceRaw: null, currency: null, priceEuro: null };
+  const result = { country: countryCode, priceRaw: null, currency: null, priceLocal: null, priceEuro: null };
 
   let bodyText = null;
   let loadedOk = false;
@@ -319,6 +321,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
       result.priceRaw = `${rawAmt} (${currency}, inkl. Steuern & Gebühren)`;
     }
     result.currency = currency;
+    result.priceLocal = val; // Betrag in der Landeswaehrung (zur VPN-Kontrolle im Frontend)
     if (val !== null) {
       const rate = rates[currency];
       if (rate) result.priceEuro = Math.round(val * rate * 100) / 100;
