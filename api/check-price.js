@@ -26,12 +26,18 @@ const CHROMIUM_PACK_URL =
 
 // ---- Konfiguration -----------------------------------------------------------------------
 
-const PROBE_COUNTRIES = ['DE', 'CO'];
-const EXPANSION_COUNTRIES = ['US', 'TH', 'IN', 'EG', 'AR', 'TR', 'LK', 'VN', 'ID', 'PK', 'PE', 'MX', 'PH', 'JP'];
-const PROBE_CONFIDENCE_THRESHOLD_PCT = 3.0;
+// Alle Laender, ueber die wir per Proxy einen Preis abfragen koennen.
+const ALL_COUNTRIES = ['DE', 'US', 'CO', 'TH', 'IN', 'EG', 'AR', 'TR', 'LK', 'VN', 'ID', 'PK', 'PE', 'MX', 'PH', 'JP'];
+// "Guenstig-Kandidat" fuer die schnelle Probe (neben dem Ausgangsland).
+const CHEAP_PROBE_COUNTRY = 'CO';
+// Ausgangsland (Referenzpreis), falls es sich nicht aus dem Link ableiten laesst.
+const DEFAULT_BASELINE_COUNTRY = 'DE';
+// Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
+// Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
+const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
 const MAX_ATTEMPTS = 2;
 const MIN_LOADED_LINES = 300;
-const TIME_BUDGET_MS = 45000; // Sicherheitsmarge unter maxDuration in vercel.json
+const TIME_BUDGET_MS = 50000; // Sicherheitsmarge unter maxDuration (60s) in vercel.json
 const CACHE_TTL_SECONDS = 24 * 3600;
 
 const DEFAULT_CURRENCY_BY_COUNTRY = {
@@ -40,25 +46,55 @@ const DEFAULT_CURRENCY_BY_COUNTRY = {
   MX: 'MXN', PH: 'PHP', JP: 'JPY',
 };
 
-// Notfall-Fallback, falls die Live-FX-Abfrage (siehe getLiveRates) fehlschlaegt.
-const STATIC_FALLBACK_RATES = {
-  EUR: 1.0, USD: 0.8759, COP: 0.000242, THB: 0.0263, INR: 0.009181, EGP: 0.0179,
-  ARS: 0.000586, TRY: 0.018692, LKR: 0.002614, VND: 0.00003324,
-  IDR: 0.00004864, PKR: 0.003147, PEN: 0.25729, MXN: 0.050051, PHP: 0.014231,
-  JPY: 0.005405,
+// Anzeige-/Sprachkuerzel aus dem Booking.com-Link (z.B. "grand-fasano.de.html") -> Ausgangsland.
+// Nur Laender, fuer die wir auch einen Proxy haben, koennen als Baseline dienen; alles andere
+// faellt auf DEFAULT_BASELINE_COUNTRY zurueck.
+const LANG_TO_BASELINE_COUNTRY = {
+  de: 'DE', 'de-de': 'DE', 'de-at': 'DE', 'de-ch': 'DE',
+  'en-us': 'US',
+  'es-co': 'CO', 'es-ar': 'AR', 'es-mx': 'MX', 'es-pe': 'PE',
+  th: 'TH', hi: 'IN', ar: 'EG', tr: 'TR',
+  vi: 'VN', id: 'ID', ja: 'JP',
 };
+
+// Leitet das Ausgangsland aus dem Anzeige-/Sprachkuerzel des Booking-Links ab. Booking-Hotel-
+// URLs enden auf ".<lang>.html" (z.B. ".de.html", ".en-gb.html"). Nicht zuordenbar -> DE.
+function detectBaselineCountry(link) {
+  try {
+    const path = new URL(link).pathname;
+    const m = path.match(/\.([a-z]{2}(?:-[a-z]{2})?)\.html$/i);
+    if (m) {
+      const lang = m[1].toLowerCase();
+      if (LANG_TO_BASELINE_COUNTRY[lang]) return LANG_TO_BASELINE_COUNTRY[lang];
+      const two = lang.slice(0, 2).toUpperCase();
+      if (ALL_COUNTRIES.includes(two)) return two;
+    }
+  } catch (e) { /* ungueltiger Link -> Default */ }
+  return DEFAULT_BASELINE_COUNTRY;
+}
 
 const BLOCKED_RESOURCE_TYPES = new Set(['image', 'media', 'font', 'stylesheet', 'other']);
 
 // ---- Live-Wechselkurse (tagesaktuell, EUR-Basis, kostenlos ohne API-Key) -----------------
+// Wichtig: Der Vergleich ist nur so verlaesslich wie der Wechselkurs. Deshalb werden zwei
+// unabhaengige Live-Quellen versucht. Liefert KEINE Quelle aktuelle Kurse, wird KEIN Preis
+// umgerechnet (getLiveRates gibt null zurueck) und die Anfrage bricht sauber ab, statt mit
+// veralteten/falschen Kursen zu rechnen.
+async function fetchJson(url, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 async function getLiveRates() {
+  // Quelle 1: open.er-api.com (deckt alle hier genutzten Waehrungen ab).
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch('https://open.er-api.com/v6/latest/EUR', { signal: controller.signal });
-    clearTimeout(t);
-    const json = await res.json();
+    const json = await fetchJson('https://open.er-api.com/v6/latest/EUR', 6000);
     if (json && json.result === 'success' && json.rates) {
       const inverse = { EUR: 1.0 };
       for (const [cur, rate] of Object.entries(json.rates)) {
@@ -66,8 +102,21 @@ async function getLiveRates() {
       }
       return inverse;
     }
-  } catch (e) { /* auf statischen Fallback zurueckfallen */ }
-  return STATIC_FALLBACK_RATES;
+  } catch (e) { /* naechste Quelle versuchen */ }
+
+  // Quelle 2: fawazahmed0 currency-api (freie ECB-/Marktdaten, ebenfalls alle Waehrungen).
+  try {
+    const json = await fetchJson('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.json', 6000);
+    if (json && json.eur) {
+      const inverse = { EUR: 1.0 };
+      for (const [cur, rate] of Object.entries(json.eur)) {
+        if (rate) inverse[cur.toUpperCase()] = 1 / rate;
+      }
+      return inverse;
+    }
+  } catch (e) { /* beide Quellen fehlgeschlagen */ }
+
+  return null; // keine verlaesslichen Live-Kurse -> Aufrufer bricht ab
 }
 
 // ---- Preis-Parsing (1:1 Logik-Port aus hotel_compare.py) -------------------------------
@@ -317,19 +366,19 @@ async function cacheSet(key, value) {
 
 // ---- Gesamtergebnis aus Einzelländern ableiten --------------------------------------------
 
-function summarize(results) {
+function summarize(results, baselineCountry) {
   const withPrice = results.filter((r) => r.priceEuro !== null);
-  if (!withPrice.length) return { success: false, reason: 'price_not_found', results };
+  if (!withPrice.length) return { success: false, reason: 'price_not_found', results, baselineCountry };
 
   const best = withPrice.reduce((a, b) => (b.priceEuro < a.priceEuro ? b : a));
-  const baseline = results.find((r) => r.country === 'DE');
+  const baseline = results.find((r) => r.country === baselineCountry);
   let savingsPct = null;
   let recommendVpnCountry = null;
-  if (baseline && baseline.priceEuro !== null && best.country !== 'DE') {
+  if (baseline && baseline.priceEuro !== null && best.country !== baselineCountry) {
     savingsPct = Math.round(((baseline.priceEuro - best.priceEuro) / baseline.priceEuro) * 1000) / 10;
     if (savingsPct >= PROBE_CONFIDENCE_THRESHOLD_PCT) recommendVpnCountry = best.country;
   }
-  return { success: true, results, best, savingsPct, recommendVpnCountry };
+  return { success: true, results, best, savingsPct, recommendVpnCountry, baselineCountry };
 }
 
 // ---- HTTP Handler ------------------------------------------------------------------------
@@ -377,31 +426,53 @@ module.exports = async (req, res) => {
   }
 
   try {
+    // Verlaessliche Live-Wechselkurse sind Pflicht - ohne sie waere der Laendervergleich
+    // wertlos. Sind beide Quellen nicht erreichbar, brechen wir sauber ab.
     const rates = await getLiveRates();
+    if (!rates) {
+      res.status(200).json({ success: false, reason: 'fx_unavailable' });
+      return;
+    }
 
-    // 1) Schnelle Probe: DE + CO NACHEINANDER (nicht parallel!). Der erste Aufruf entpackt
-    //    das Chromium-Paket samt Shared Libraries vollstaendig nach /tmp; wuerden mehrere
-    //    Browser gleichzeitig starten, kollidiert das Entpacken (spawn ETXTBSY / libnss3.so
-    //    fehlt). Ab dem zweiten Aufruf ist Chromium bereits entpackt und der Start ist schnell.
+    // Ausgangsland (Referenzpreis) aus dem Booking-Link ableiten - nicht zwingend Deutschland.
+    const baselineCountry = detectBaselineCountry(link);
+
+    // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien), NACHEINANDER (nicht parallel!). Der
+    // erste Aufruf entpackt das Chromium-Paket samt Shared Libraries vollstaendig nach /tmp;
+    // wuerden mehrere Browser gleichzeitig starten, kollidiert das Entpacken (spawn ETXTBSY /
+    // libnss3.so fehlt). Ab dem zweiten Aufruf ist Chromium bereits entpackt.
+    const probeCountries = [baselineCountry];
+    if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
+
     let results = [];
-    for (const c of PROBE_COUNTRIES) {
+    for (const c of probeCountries) {
       results.push(await fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates));
     }
 
-    console.log('[check-price] Probe-Ergebnis:', JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
+    console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
+      JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
-    let summary = summarize(results);
+    let summary = summarize(results, baselineCountry);
     let partial = false;
 
-    // 2) Nur erweitern, wenn die Probe keine klare Ersparnis zeigt
-    const probeConclusive = summary.success && summary.recommendVpnCountry;
+    // Erweitern, wenn der Guenstig-Kandidat nicht mindestens 10% guenstiger als das Ausgangsland
+    // ist (oder das Ausgangsland/CO keinen Preis lieferte). Dann alle restlichen Laender pruefen.
+    const baseR = results.find((r) => r.country === baselineCountry);
+    const cheapR = results.find((r) => r.country === CHEAP_PROBE_COUNTRY);
+    let probeConclusive = false;
+    if (baseR && cheapR && baseR.priceEuro !== null && cheapR.priceEuro !== null) {
+      const diffPct = ((cheapR.priceEuro - baseR.priceEuro) / baseR.priceEuro) * 100;
+      probeConclusive = diffPct <= -PROBE_CONFIDENCE_THRESHOLD_PCT;
+    }
+
     if (!probeConclusive) {
-      for (const country of EXPANSION_COUNTRIES) {
+      const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
+      for (const country of remaining) {
         if (Date.now() - startTime > TIME_BUDGET_MS) { partial = true; break; }
         const r = await fetchPrice(country, link, proxyServer, userPrefix, password, room, board, rates);
         results.push(r);
       }
-      summary = summarize(results);
+      summary = summarize(results, baselineCountry);
     }
 
     const payload = { ...summary, partial };
