@@ -307,12 +307,44 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     } catch (e) { /* ignorieren */ }
 
     const bodyText = await page.evaluate(() => document.body.innerText);
+
+    // Zimmernamen direkt aus dem DOM der Zimmertabelle lesen (der erste Link je Tabellenzeile in
+    // der Spalte "Zimmerkategorie"/"Unterkunftstyp"). Das ist exakt das, was der Nutzer sieht, und
+    // deutlich zuverlaessiger als aus dem reinen Text zu raten (dort landen sonst Ausstattungs-Chips).
+    let roomNames = [];
+    try {
+      roomNames = await page.evaluate(() => {
+        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const out = [];
+        const push = (n) => {
+          n = clean(n);
+          if (n && n.length >= 3 && n.length <= 70 && !out.includes(n)) out.push(n);
+        };
+        // Strategie 1: klassische Zimmertabelle mit Kopf "Zimmerkategorie"/"Unterkunftstyp"
+        for (const t of document.querySelectorAll('table')) {
+          const ths = [...t.querySelectorAll('th')].map((th) => (th.innerText || '').toLowerCase());
+          if (!ths.some((h) => /zimmerkategorie|unterkunftstyp|zimmertyp|room type/.test(h))) continue;
+          for (const row of t.querySelectorAll('tr')) {
+            const cell = row.querySelector('td');
+            if (!cell) continue;
+            const a = cell.querySelector('a');
+            if (a && clean(a.innerText)) push(a.innerText);
+          }
+        }
+        if (out.length) return out;
+        // Strategie 2: bekannte Zimmernamen-Links / -Testids
+        const sel = 'a.hprt-roomtype-icon-link, .hprt-roomtype-link, [data-testid="room-name"], [data-testid="rt-title"], [data-component="room-type-name"]';
+        for (const el of document.querySelectorAll(sel)) push(el.innerText || el.textContent);
+        return out;
+      });
+    } catch (e) { roomNames = []; }
+
     await browser.close();
-    return { bodyText, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
+    return { bodyText, roomNames, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
-    return { bodyText: null, loadedOk: false, err };
+    return { bodyText: null, roomNames: [], loadedOk: false, err };
   }
 }
 
@@ -504,22 +536,26 @@ module.exports = async (req, res) => {
       try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
       const baselineCountry = detectBaselineCountry(link);
 
+      // Zimmernamen zuerst aus den DOM-Links der Zimmertabelle nehmen (r.roomNames), nur wenn die
+      // leer sind, faellt es auf die Text-Heuristik zurueck.
+      const roomsFrom = (r) => (r.roomNames && r.roomNames.length ? r.roomNames : listRooms(r.bodyText || ''));
+
       // 1) OHNE Proxy versuchen (kostet nichts) - Zimmernamen sind laenderunabhaengig.
-      let bodyText = null;
+      let rooms = null;
       {
         const r = await attemptFetch(link, null, null);
-        if (r.loadedOk && listRooms(r.bodyText).length) bodyText = r.bodyText;
+        if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) rooms = rl; }
       }
       // 2) Nur falls Booking den Server-IP blockt (leere/geblockte Seite): ueber Proxy laden.
-      if (!bodyText) {
+      if (!rooms) {
         const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
-        for (let a = 1; a <= 2 && !bodyText; a++) {
+        for (let a = 1; a <= 2 && !rooms; a++) {
           const r = await attemptFetch(link, srv, proxyAuth);
-          if (r.loadedOk && listRooms(r.bodyText).length) bodyText = r.bodyText;
+          if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) rooms = rl; }
         }
       }
-      if (!bodyText) { res.status(200).json({ success: false, reason: 'rooms_not_loaded' }); return; }
-      res.status(200).json({ success: true, rooms: listRooms(bodyText), baselineCountry });
+      if (!rooms) { res.status(200).json({ success: false, reason: 'rooms_not_loaded' }); return; }
+      res.status(200).json({ success: true, rooms, baselineCountry });
     } catch (err) {
       res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
     }
