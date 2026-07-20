@@ -26,8 +26,11 @@ const CHROMIUM_PACK_URL =
 
 // ---- Konfiguration -----------------------------------------------------------------------
 
-// Alle Laender, ueber die wir per Proxy einen Preis abfragen koennen.
-const ALL_COUNTRIES = ['DE', 'US', 'CO', 'TH', 'IN', 'EG', 'AR', 'TR', 'LK', 'VN', 'ID', 'PK', 'PE', 'MX', 'PH', 'JP'];
+// Alle Laender, ueber die wir per Proxy einen Preis abfragen koennen. Reihenfolge = Prioritaet
+// bei der Erweiterung: erfahrungsgemaess guenstige Laender (schwache Waehrung/hohe Inflation)
+// zuerst, damit ein evtl. durch das Zeitlimit gekuerztes Ergebnis trotzdem die relevanten
+// Kandidaten enthaelt. Teure Maerkte (USA, Japan) ganz am Ende.
+const ALL_COUNTRIES = ['DE', 'CO', 'TR', 'AR', 'EG', 'IN', 'VN', 'ID', 'PK', 'LK', 'PE', 'MX', 'PH', 'TH', 'US', 'JP'];
 // "Guenstig-Kandidat" fuer die schnelle Probe (neben dem Ausgangsland).
 const CHEAP_PROBE_COUNTRY = 'CO';
 // Ausgangsland (Referenzpreis), falls es sich nicht aus dem Link ableiten laesst.
@@ -35,11 +38,15 @@ const DEFAULT_BASELINE_COUNTRY = 'DE';
 // Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
 // Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
-const MAX_ATTEMPTS = 2;          // Versuche fuer Ausgangsland + Kolumbien (Genauigkeit wichtig)
-const EXPANSION_ATTEMPTS = 1;    // Versuche fuer die zusaetzlichen Laender (Tempo wichtig)
+// Nur 1 Versuch pro Land: Ein zweiter Versuch koennte ein einzelnes Land auf ~40s treiben und
+// damit das harte 60s-Limit von Vercel sprengen (-> 504). Lieber ein Land ueberspringen.
+const MAX_ATTEMPTS = 1;
+const EXPANSION_ATTEMPTS = 1;
 const BATCH_SIZE = 3;            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
 const MIN_LOADED_LINES = 300;
-const TIME_BUDGET_MS = 50000; // Sicherheitsmarge unter maxDuration (60s) in vercel.json
+// Vor jeder neuen Ländergruppe pruefen: ist mehr Zeit als dieses Budget verstrichen, wird
+// abgebrochen. 36s + max. eine ~20s-Gruppe + Antwort bleibt sicher unter dem 60s-Limit.
+const TIME_BUDGET_MS = 36000;
 const CACHE_TTL_SECONDS = 24 * 3600;
 
 const DEFAULT_CURRENCY_BY_COUNTRY = {
@@ -236,11 +243,11 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
       else req.continue();
     });
 
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 13000 });
 
     for (const sel of ["button ::-p-text('Alle akzeptieren')", '#onetrust-accept-btn-handler']) {
       try {
-        await page.click(sel, { timeout: 1500 });
+        await page.click(sel, { timeout: 1200 });
         break;
       } catch (e) { /* kein Banner - ignorieren */ }
     }
@@ -248,10 +255,10 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     try {
       await page.waitForFunction(
         () => /Zimmerkategorie|Preis für/i.test(document.body.innerText),
-        { timeout: 12000 }
+        { timeout: 6000 }
       );
     } catch (e) {
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 1500));
     }
 
     try {
