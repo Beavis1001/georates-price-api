@@ -379,10 +379,14 @@ module.exports = async (req, res) => {
   try {
     const rates = await getLiveRates();
 
-    // 1) Schnelle Probe: DE + CO parallel
-    let results = await Promise.all(
-      PROBE_COUNTRIES.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates))
-    );
+    // 1) Schnelle Probe: DE + CO NACHEINANDER (nicht parallel!). Der erste Aufruf entpackt
+    //    das Chromium-Paket samt Shared Libraries vollstaendig nach /tmp; wuerden mehrere
+    //    Browser gleichzeitig starten, kollidiert das Entpacken (spawn ETXTBSY / libnss3.so
+    //    fehlt). Ab dem zweiten Aufruf ist Chromium bereits entpackt und der Start ist schnell.
+    let results = [];
+    for (const c of PROBE_COUNTRIES) {
+      results.push(await fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates));
+    }
 
     console.log('[check-price] Probe-Ergebnis:', JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
