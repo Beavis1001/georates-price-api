@@ -572,21 +572,28 @@ module.exports = async (req, res) => {
       const roomsFrom = (r) => (r.rooms && r.rooms.length
         ? r.rooms
         : listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] })));
+      const hasOpts = (rl) => rl.some((x) => (x.boards && x.boards.length) || (x.cancels && x.cancels.length));
 
-      // 1) OHNE Proxy versuchen (kostet nichts) - Zimmernamen sind laenderunabhaengig.
-      let rooms = null;
-      {
-        const r = await attemptFetch(link, null, null);
-        if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) rooms = rl; }
-      }
-      // 2) Nur falls Booking den Server-IP blockt (leere/geblockte Seite): ueber Proxy laden.
-      if (!rooms) {
-        const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
-        for (let a = 1; a <= 2 && !rooms; a++) {
-          const r = await attemptFetch(link, srv, proxyAuth);
-          if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) rooms = rl; }
+      let withOpts = null;   // Zimmer inkl. Verpflegungs-/Storno-Optionen (bevorzugt)
+      let namesOnly = null;  // Zimmer nur mit Namen (Fallback)
+
+      // 1) Ueber den Baseline-Proxy laden: NUR mit echter (Residential-)Verfuegbarkeit liefert
+      //    Booking die Tarifzeilen mit Verpflegung/Storno. Ein Datacenter-Direktabruf bekommt zwar
+      //    die Zimmernamen, aber keine Optionen - daher hier Proxy zuerst.
+      const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
+      for (let a = 1; a <= 2 && !withOpts; a++) {
+        const r = await attemptFetch(link, srv, proxyAuth);
+        if (r.loadedOk) {
+          const rl = roomsFrom(r);
+          if (rl.length) { if (hasOpts(rl)) withOpts = rl; else if (!namesOnly) namesOnly = rl; }
         }
       }
+      // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
+      if (!withOpts && !namesOnly) {
+        const r = await attemptFetch(link, null, null);
+        if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
+      }
+      const rooms = withOpts || namesOnly;
       if (!rooms) { res.status(200).json({ success: false, reason: 'rooms_not_loaded' }); return; }
       res.status(200).json({ success: true, rooms, baselineCountry });
     } catch (err) {
