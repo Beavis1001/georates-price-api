@@ -315,8 +315,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     // Verpflegungs- und Storno-Optionen (ueber alle Tarifzeilen des Zimmers). Viel zuverlaessiger
     // als aus dem reinen Text zu raten.
     let roomData = [];
+    let roomMeta = null;
     try {
-      roomData = await page.evaluate(() => {
+      const ev = await page.evaluate(() => {
         const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
         const boardsOf = (t) => {
           t = t.toLowerCase();
@@ -342,6 +343,8 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
           if (!map[name]) { map[name] = ''; order.push(name); }
           map[name] += ' ' + (txt || '');
         };
+        let strategy = 0;
+        let tablesTotal = document.querySelectorAll('table').length;
         // Strategie 1: klassische Zimmertabelle. Der Zimmername steht per rowspan nur in der ersten
         // Tarifzeile; Folgezeilen gehoeren zum selben (zuletzt gesehenen) Zimmer.
         for (const tbl of document.querySelectorAll('table')) {
@@ -356,7 +359,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
             if (nm && nm.length >= 3 && nm.length <= 70) cur = nm;
             if (cur) addRow(cur, row.innerText);
           }
-          if (order.length) break;
+          if (order.length) { strategy = 1; break; }
         }
         // Strategie 2 (Fallback): nur Namen aus bekannten Zimmernamen-Links.
         if (!order.length) {
@@ -365,13 +368,24 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
             const nm = clean(el.innerText || el.textContent);
             if (nm && nm.length >= 3 && nm.length <= 70) addRow(nm, '');
           }
+          if (order.length) strategy = 2;
         }
-        return order.map((name) => ({ name, boards: boardsOf(map[name]), cancels: cancelsOf(map[name]) }));
+        const rooms = order.map((name) => ({ name, boards: boardsOf(map[name]), cancels: cancelsOf(map[name]) }));
+        const meta = {
+          strategy,
+          tablesTotal,
+          firstOptSample: order.length ? (map[order[0]] || '').slice(0, 260) : '',
+          bodyHasFruehstueck: /fr(ü|ue)hst(ü|ue)ck/i.test(document.body.innerText),
+          bodyHasStorno: /stornier/i.test(document.body.innerText),
+        };
+        return { rooms, meta };
       });
+      roomData = ev.rooms || [];
+      roomMeta = ev.meta || null;
     } catch (e) { roomData = []; }
 
     await browser.close();
-    return { bodyText, rooms: roomData, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
+    return { bodyText, rooms: roomData, roomMeta, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
@@ -576,6 +590,7 @@ module.exports = async (req, res) => {
 
       let withOpts = null;   // Zimmer inkl. Verpflegungs-/Storno-Optionen (bevorzugt)
       let namesOnly = null;  // Zimmer nur mit Namen (Fallback)
+      let lastR = null;
 
       // 1) Ueber den Baseline-Proxy laden: NUR mit echter (Residential-)Verfuegbarkeit liefert
       //    Booking die Tarifzeilen mit Verpflegung/Storno. Ein Datacenter-Direktabruf bekommt zwar
@@ -583,6 +598,7 @@ module.exports = async (req, res) => {
       const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
       for (let a = 1; a <= 2 && !withOpts; a++) {
         const r = await attemptFetch(link, srv, proxyAuth);
+        lastR = r;
         if (r.loadedOk) {
           const rl = roomsFrom(r);
           if (rl.length) { if (hasOpts(rl)) withOpts = rl; else if (!namesOnly) namesOnly = rl; }
@@ -591,11 +607,19 @@ module.exports = async (req, res) => {
       // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
       if (!withOpts && !namesOnly) {
         const r = await attemptFetch(link, null, null);
+        lastR = r;
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
       const rooms = withOpts || namesOnly;
-      if (!rooms) { res.status(200).json({ success: false, reason: 'rooms_not_loaded' }); return; }
-      res.status(200).json({ success: true, rooms, baselineCountry });
+      if (!rooms) {
+        const failPayload = { success: false, reason: 'rooms_not_loaded' };
+        if (req.body && req.body.debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
+        res.status(200).json(failPayload);
+        return;
+      }
+      const payload = { success: true, rooms, baselineCountry };
+      if (req.body && req.body.debug && lastR) payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length };
+      res.status(200).json(payload);
     } catch (err) {
       res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
     }
