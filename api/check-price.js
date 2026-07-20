@@ -234,10 +234,12 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   };
   // Booking-Formulierungen: "Kostenlose Stornierung vor dem ..." (erstattbar) vs
   // "Nicht kostenlos stornierbar" (nicht erstattbar).
-  const isFree = (ctx) => /kostenlose stornierung/i.test(ctx);
-  const isNonRef = (ctx) => /nicht kostenlos stornierbar/i.test(ctx);
+  const isFree = (ctx) => /kostenlose stornierung|kostenlos stornierbar/i.test(ctx);
+  const isPartial = (ctx) => /teilweise erstattbar/i.test(ctx);
+  const isNonRef = (ctx) => /nicht kostenlos stornierbar|nicht erstattbar|keine kostenlose stornierung/i.test(ctx);
   const matchesCancel = (ctx) => {
     if (cancelPref === 'ja') return isFree(ctx);
+    if (cancelPref === 'teilweise') return isPartial(ctx);
     if (cancelPref === 'nein') return isNonRef(ctx);
     return true; // "unsicher"/leer -> egal
   };
@@ -308,43 +310,72 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
 
     const bodyText = await page.evaluate(() => document.body.innerText);
 
-    // Zimmernamen direkt aus dem DOM der Zimmertabelle lesen (der erste Link je Tabellenzeile in
-    // der Spalte "Zimmerkategorie"/"Unterkunftstyp"). Das ist exakt das, was der Nutzer sieht, und
-    // deutlich zuverlaessiger als aus dem reinen Text zu raten (dort landen sonst Ausstattungs-Chips).
-    let roomNames = [];
+    // Zimmer direkt aus dem DOM der Zimmertabelle lesen: pro Zeile der erste Link (= der blaue
+    // Zimmername, exakt was der Nutzer sieht) plus die in DIESEM Zimmerblock real vorhandenen
+    // Verpflegungs- und Storno-Optionen (ueber alle Tarifzeilen des Zimmers). Viel zuverlaessiger
+    // als aus dem reinen Text zu raten.
+    let roomData = [];
     try {
-      roomNames = await page.evaluate(() => {
+      roomData = await page.evaluate(() => {
         const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-        const out = [];
-        const push = (n) => {
-          n = clean(n);
-          if (n && n.length >= 3 && n.length <= 70 && !out.includes(n)) out.push(n);
+        const boardsOf = (t) => {
+          t = t.toLowerCase();
+          const b = [];
+          if (/all[-\s]?inclusive/.test(t)) b.push('allinclusive');
+          if (/vollpension/.test(t)) b.push('vollpension');
+          if (/halbpension|abendessen inbegriffen/.test(t)) b.push('halbpension');
+          if (/fr(ü|ue)hst(ü|ue)ck/.test(t)) b.push('fruehstueck');
+          if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only/.test(t)) b.push('uebernachtung');
+          return [...new Set(b)];
         };
-        // Strategie 1: klassische Zimmertabelle mit Kopf "Zimmerkategorie"/"Unterkunftstyp"
-        for (const t of document.querySelectorAll('table')) {
-          const ths = [...t.querySelectorAll('th')].map((th) => (th.innerText || '').toLowerCase());
+        const cancelsOf = (t) => {
+          t = t.toLowerCase();
+          const c = [];
+          if (/kostenlose stornierung|kostenlos stornierbar/.test(t)) c.push('ja');
+          if (/teilweise erstattbar/.test(t)) c.push('teilweise');
+          if (/nicht erstattbar|nicht kostenlos stornierbar|keine kostenlose stornierung/.test(t)) c.push('nein');
+          return [...new Set(c)];
+        };
+        const order = [];
+        const map = {};
+        const addRow = (name, txt) => {
+          if (!map[name]) { map[name] = ''; order.push(name); }
+          map[name] += ' ' + (txt || '');
+        };
+        // Strategie 1: klassische Zimmertabelle. Der Zimmername steht per rowspan nur in der ersten
+        // Tarifzeile; Folgezeilen gehoeren zum selben (zuletzt gesehenen) Zimmer.
+        for (const tbl of document.querySelectorAll('table')) {
+          const ths = [...tbl.querySelectorAll('th')].map((th) => (th.innerText || '').toLowerCase());
           if (!ths.some((h) => /zimmerkategorie|unterkunftstyp|zimmertyp|room type/.test(h))) continue;
-          for (const row of t.querySelectorAll('tr')) {
-            const cell = row.querySelector('td');
-            if (!cell) continue;
-            const a = cell.querySelector('a');
-            if (a && clean(a.innerText)) push(a.innerText);
+          let cur = null;
+          for (const row of tbl.querySelectorAll('tr')) {
+            const firstTd = [...row.children].find((c) => c.tagName === 'TD');
+            if (!firstTd) continue;
+            const a = firstTd.querySelector('a');
+            const nm = a ? clean(a.innerText) : '';
+            if (nm && nm.length >= 3 && nm.length <= 70) cur = nm;
+            if (cur) addRow(cur, row.innerText);
+          }
+          if (order.length) break;
+        }
+        // Strategie 2 (Fallback): nur Namen aus bekannten Zimmernamen-Links.
+        if (!order.length) {
+          const sel = 'a.hprt-roomtype-icon-link, .hprt-roomtype-link, [data-testid="room-name"], [data-testid="rt-title"], [data-component="room-type-name"]';
+          for (const el of document.querySelectorAll(sel)) {
+            const nm = clean(el.innerText || el.textContent);
+            if (nm && nm.length >= 3 && nm.length <= 70) addRow(nm, '');
           }
         }
-        if (out.length) return out;
-        // Strategie 2: bekannte Zimmernamen-Links / -Testids
-        const sel = 'a.hprt-roomtype-icon-link, .hprt-roomtype-link, [data-testid="room-name"], [data-testid="rt-title"], [data-component="room-type-name"]';
-        for (const el of document.querySelectorAll(sel)) push(el.innerText || el.textContent);
-        return out;
+        return order.map((name) => ({ name, boards: boardsOf(map[name]), cancels: cancelsOf(map[name]) }));
       });
-    } catch (e) { roomNames = []; }
+    } catch (e) { roomData = []; }
 
     await browser.close();
-    return { bodyText, roomNames, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
+    return { bodyText, rooms: roomData, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
-    return { bodyText: null, roomNames: [], loadedOk: false, err };
+    return { bodyText: null, rooms: [], loadedOk: false, err };
   }
 }
 
@@ -536,9 +567,11 @@ module.exports = async (req, res) => {
       try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
       const baselineCountry = detectBaselineCountry(link);
 
-      // Zimmernamen zuerst aus den DOM-Links der Zimmertabelle nehmen (r.roomNames), nur wenn die
-      // leer sind, faellt es auf die Text-Heuristik zurueck.
-      const roomsFrom = (r) => (r.roomNames && r.roomNames.length ? r.roomNames : listRooms(r.bodyText || ''));
+      // Zimmer zuerst aus den DOM-Links der Zimmertabelle nehmen (r.rooms, inkl. Verpflegungs-/
+      // Storno-Optionen); nur wenn leer, faellt es auf die Text-Heuristik (nur Namen) zurueck.
+      const roomsFrom = (r) => (r.rooms && r.rooms.length
+        ? r.rooms
+        : listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] })));
 
       // 1) OHNE Proxy versuchen (kostet nichts) - Zimmernamen sind laenderunabhaengig.
       let rooms = null;
