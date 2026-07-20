@@ -552,6 +552,65 @@ function listRooms(bodyText) {
   return rooms;
 }
 
+// Verpflegungs-/Storno-Tokens aus einem Textabschnitt bestimmen (identisch zur In-Page-Logik,
+// hier aber im Node-Kontext, damit wir die Optionen layout-unabhaengig direkt aus dem Seitentext
+// je Zimmer ableiten koennen - die DOM-Tabellenerkennung greift nicht auf allen Booking-Layouts).
+function boardsFromText(t) {
+  t = (t || '').toLowerCase();
+  const b = [];
+  if (/all[-\s]?inclusive/.test(t)) b.push('allinclusive');
+  if (/vollpension/.test(t)) b.push('vollpension');
+  if (/halbpension|abendessen inbegriffen/.test(t)) b.push('halbpension');
+  if (/fr(ü|ue)hst(ü|ue)ck/.test(t)) b.push('fruehstueck');
+  if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only/.test(t)) b.push('uebernachtung');
+  return [...new Set(b)];
+}
+function cancelsFromText(t) {
+  t = (t || '').toLowerCase();
+  const c = [];
+  if (/kostenlose stornierung|kostenlos stornierbar/.test(t)) c.push('ja');
+  if (/teilweise erstattbar/.test(t)) c.push('teilweise');
+  if (/nicht erstattbar|nicht kostenlos stornierbar|keine kostenlose stornierung/.test(t)) c.push('nein');
+  return [...new Set(c)];
+}
+
+// Fuer jeden Zimmernamen den Textabschnitt vom ersten Vorkommen bis zum naechsten Zimmernamen
+// scannen und daraus Verpflegung/Storno bestimmen.
+function computeRoomOptions(bodyText, names) {
+  const lines = (bodyText || '').split('\n').map((l) => l.trim());
+  const positions = names
+    .map((n) => {
+      const nl = n.toLowerCase();
+      const idx = lines.findIndex((l) => l.toLowerCase().includes(nl));
+      return { name: n, idx };
+    })
+    .filter((p) => p.idx >= 0)
+    .sort((a, b) => a.idx - b.idx);
+  const result = {};
+  for (let i = 0; i < positions.length; i++) {
+    const start = positions[i].idx;
+    const end = i + 1 < positions.length ? positions[i + 1].idx : Math.min(lines.length, start + 60);
+    const span = lines.slice(start, end).join('\n');
+    result[positions[i].name] = { boards: boardsFromText(span), cancels: cancelsFromText(span) };
+  }
+  return result;
+}
+
+// Fehlende Verpflegungs-/Storno-Optionen (z.B. wenn nur die Namen aus dem DOM kamen) aus dem
+// Seitentext ergaenzen. DOM-Werte haben Vorrang, sind aber oft leer.
+function enrichRoomOptions(bodyText, rooms) {
+  if (!bodyText || !rooms.length) return rooms;
+  const opts = computeRoomOptions(bodyText, rooms.map((r) => r.name));
+  return rooms.map((r) => {
+    const c = opts[r.name] || { boards: [], cancels: [] };
+    return {
+      name: r.name,
+      boards: r.boards && r.boards.length ? r.boards : c.boards,
+      cancels: r.cancels && r.cancels.length ? r.cancels : c.cancels,
+    };
+  });
+}
+
 // ---- HTTP Handler ------------------------------------------------------------------------
 
 module.exports = async (req, res) => {
@@ -583,9 +642,12 @@ module.exports = async (req, res) => {
 
       // Zimmer zuerst aus den DOM-Links der Zimmertabelle nehmen (r.rooms, inkl. Verpflegungs-/
       // Storno-Optionen); nur wenn leer, faellt es auf die Text-Heuristik (nur Namen) zurueck.
-      const roomsFrom = (r) => (r.rooms && r.rooms.length
-        ? r.rooms
-        : listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] })));
+      const roomsFrom = (r) => {
+        const base = r.rooms && r.rooms.length
+          ? r.rooms
+          : listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] }));
+        return enrichRoomOptions(r.bodyText || '', base);
+      };
       const hasOpts = (rl) => rl.some((x) => (x.boards && x.boards.length) || (x.cancels && x.cancels.length));
 
       let withOpts = null;   // Zimmer inkl. Verpflegungs-/Storno-Optionen (bevorzugt)
