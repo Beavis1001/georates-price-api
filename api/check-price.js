@@ -169,7 +169,7 @@ function looksLikeNewRoomHeading(lines, idx) {
   return false;
 }
 
-function findRoomPrice(bodyText, roomName, boardType) {
+function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
   const roomLower = roomName.toLowerCase();
   let start = null;
@@ -180,16 +180,16 @@ function findRoomPrice(bodyText, roomName, boardType) {
   if (start === null) return [null, null];
 
   const maxEnd = Math.min(start + 250, lines.length);
-  const tiers = [];
+  const rawTiers = []; // { amount, anchor }
   let lastAmountLine = -1;
   let k = start + 1;
   while (k < maxEnd) {
-    if (tiers.length && looksLikeNewRoomHeading(lines, k)) break;
+    if (rawTiers.length && looksLikeNewRoomHeading(lines, k)) break;
 
     const pm = PRICE_PREFIX_RE.exec(lines[k]);
     if (pm) {
       lastAmountLine = k;
-      tiers.push([pm[2], lines.slice(k, k + 10).join('\n')]);
+      rawTiers.push({ amount: pm[2], anchor: k });
     } else if (TAX_LINE_RE.test(lines[k])) {
       let amount = null;
       for (let back = k - 1; back > Math.max(k - 1 - BACKSCAN_LINES, start); back--) {
@@ -197,20 +197,45 @@ function findRoomPrice(bodyText, roomName, boardType) {
         if (m) { amount = m[2]; break; }
         if (back === lastAmountLine) break;
       }
-      if (amount) tiers.push([amount, lines.slice(k, k + 10).join('\n')]);
+      if (amount) rawTiers.push({ amount, anchor: k });
     }
     k++;
   }
 
-  if (!tiers.length) return [null, null];
+  if (!rawTiers.length) return [null, null];
 
-  if (boardType) {
-    const normTarget = boardType.toLowerCase().replace(/[\s-]/g, '');
-    for (const [amount, context] of tiers) {
-      const normCtx = context.toLowerCase().replace(/[\s-]/g, '');
-      if (normCtx.includes(normTarget)) return [amount, context];
-    }
-  }
+  // Kontext je Ratenstufe bis zur NAECHSTEN Stufe begrenzen (max. 14 Zeilen), damit die
+  // Verpflegungs-/Stornierungserkennung nicht in die naechste Rate "ausblutet".
+  const tiers = rawTiers.map((t, i) => {
+    const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : lines.length;
+    const end = Math.min(nextAnchor, t.anchor + 14);
+    return [t.amount, lines.slice(t.anchor, end).join('\n')];
+  });
+
+  // Deutsche Umlaute vereinheitlichen, damit z.B. Formularwert "fruehstueck" zu "Frühstück"
+  // auf der Seite passt (frueher schlug dieser Vergleich fehl -> falsche Rate).
+  const normDe = (s) => (s || '').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[\s-]/g, '');
+  const matchesBoard = (ctx) => {
+    if (!boardType || boardType === 'egal') return true;
+    return normDe(ctx).includes(normDe(boardType));
+  };
+  // Booking-Formulierungen: "Kostenlose Stornierung vor dem ..." (erstattbar) vs
+  // "Nicht kostenlos stornierbar" (nicht erstattbar).
+  const isFree = (ctx) => /kostenlose stornierung/i.test(ctx);
+  const isNonRef = (ctx) => /nicht kostenlos stornierbar/i.test(ctx);
+  const matchesCancel = (ctx) => {
+    if (cancelPref === 'ja') return isFree(ctx);
+    if (cancelPref === 'nein') return isNonRef(ctx);
+    return true; // "unsicher"/leer -> egal
+  };
+
+  // Auswahl-Priorität: 1) Verpflegung UND Stornier-Wunsch, 2) nur Verpflegung,
+  // 3) nur Stornier-Wunsch, 4) erste gefundene Stufe.
+  for (const t of tiers) if (matchesBoard(t[1]) && matchesCancel(t[1])) return t;
+  for (const t of tiers) if (matchesBoard(t[1])) return t;
+  for (const t of tiers) if (matchesCancel(t[1])) return t;
   return tiers[0];
 }
 
@@ -279,7 +304,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
   }
 }
 
-async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, rates, maxAttempts) {
+async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, cancel, rates, maxAttempts) {
   const attempts = maxAttempts || MAX_ATTEMPTS;
   const t0 = Date.now();
   const proxyAuth = { username: `${userPrefix}${countryCode}`, password };
@@ -310,7 +335,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   }
 
   const currency = expectedCurrency || 'EUR';
-  const [rawAmt, ctx] = findRoomPrice(bodyText, room, board);
+  const [rawAmt, ctx] = findRoomPrice(bodyText, room, board, cancel);
   if (rawAmt) {
     let val = parseAmount(rawAmt);
     const taxPct = extractExclusiveTaxPct(ctx);
@@ -353,8 +378,8 @@ async function verifyTurnstile(token, remoteIp) {
 
 // ---- Ergebnis-Cache (Upstash Redis REST, optional) ----------------------------------------
 
-function cacheKeyFor(link, room, board) {
-  return 'georates:' + crypto.createHash('sha256').update(`${link}|${room}|${board}`).digest('hex').slice(0, 32);
+function cacheKeyFor(link, room, board, cancel) {
+  return 'georates:' + crypto.createHash('sha256').update(`${link}|${room}|${board}|${cancel}`).digest('hex').slice(0, 32);
 }
 
 async function cacheGet(key) {
@@ -409,7 +434,7 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ success: false, reason: 'method_not_allowed' }); return; }
 
-  const { link, room, board, turnstileToken } = req.body || {};
+  const { link, room, board, cancel, turnstileToken } = req.body || {};
 
   const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
@@ -427,7 +452,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const cacheKey = cacheKeyFor(link, room, board || '');
+  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '');
   const cached = await cacheGet(cacheKey);
   if (cached) {
     res.status(200).json({ ...cached, fromCache: true });
@@ -463,7 +488,7 @@ module.exports = async (req, res) => {
     if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
 
     let results = await Promise.all(
-      probeCountries.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates, MAX_ATTEMPTS))
+      probeCountries.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, MAX_ATTEMPTS))
     );
 
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
@@ -491,7 +516,7 @@ module.exports = async (req, res) => {
         if (Date.now() - startTime > TIME_BUDGET_MS) { partial = true; break; }
         const batch = remaining.slice(i, i + BATCH_SIZE);
         const batchResults = await Promise.all(
-          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates, EXPANSION_ATTEMPTS))
+          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, EXPANSION_ATTEMPTS))
         );
         results.push(...batchResults);
       }
