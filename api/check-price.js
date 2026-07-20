@@ -38,9 +38,10 @@ const DEFAULT_BASELINE_COUNTRY = 'DE';
 // Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
 // Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
-// Nur 1 Versuch pro Land: Ein zweiter Versuch koennte ein einzelnes Land auf ~40s treiben und
-// damit das harte 60s-Limit von Vercel sprengen (-> 504). Lieber ein Land ueberspringen.
-const MAX_ATTEMPTS = 1;
+// Ausgangsland + Kolumbien: 2 Versuche (Referenzpreis MUSS verlaesslich sein). Dank der kurzen
+// Einzel-Timeouts unten bleiben selbst 2 Versuche pro Land klar unter dem 60s-Limit von Vercel.
+// Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
+const MAX_ATTEMPTS = 2;
 const EXPANSION_ATTEMPTS = 1;
 const BATCH_SIZE = 3;            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
 const MIN_LOADED_LINES = 300;
