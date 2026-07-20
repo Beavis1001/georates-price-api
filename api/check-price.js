@@ -252,14 +252,15 @@ function detectSessionCurrency(bodyText) {
 async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
   let browser;
   try {
+    const launchArgs = proxyServer ? [...chromium.args, `--proxy-server=${proxyServer}`] : [...chromium.args];
     browser = await puppeteer.launch({
-      args: [...chromium.args, `--proxy-server=${proxyServer}`],
+      args: launchArgs,
       defaultViewport: { width: 1280, height: 900 },
       executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
       headless: chromium.headless,
     });
     const page = await browser.newPage();
-    await page.authenticate(proxyAuth);
+    if (proxyServer && proxyAuth) await page.authenticate(proxyAuth);
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
     );
@@ -423,6 +424,41 @@ function summarize(results, baselineCountry) {
   return { success: true, results, best, savingsPct, recommendVpnCountry, baselineCountry };
 }
 
+// ---- Alle Zimmernamen einer Hotelseite auflisten (fuer das Dropdown im Formular) ----------
+// Nutzt dieselbe Heuristik wie die Zimmererkennung: eine Zeile ist eine Zimmer-Ueberschrift,
+// wenn kurz danach eine Flaechenangabe ("... m²") folgt.
+const BED_RE = /doppelbett|einzelbett|zweibett|etagenbett|schlafsofa|schlafcouch|\bbett\b|\bbetten\b/i;
+// Zeilen, die KEIN Zimmername sein koennen (Amenity-/Preis-/Options-Zeilen).
+const NOT_ROOM_RE = /m²|€|\beur\b|inbegriffen|stornier|steuern|geb(ü|ue)hren|^preis\b|^gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verfügbar/i;
+
+// Ein Zimmername ist eine kurze, "saubere" Zeile, die DIREKT von einer Bett-Angabe gefolgt wird
+// (z.B. "Deluxe King" -> "1 französisches Doppelbett"). Das ist ein deutlich verlaesslicheres
+// Signal als die Flaechenangabe "m²", die oft erst viele Zeilen spaeter kommt.
+function isRoomName(lines, idx) {
+  const l = lines[idx] || '';
+  if (l.length < 3 || l.length > 55) return false;
+  if (NOT_ROOM_RE.test(l)) return false;
+  if (/\d/.test(l) && BED_RE.test(l)) return false; // Bett-Zeile selbst ist kein Name
+  for (let j = idx + 1; j <= Math.min(idx + 2, lines.length - 1); j++) {
+    if (BED_RE.test(lines[j])) return true;
+  }
+  return false;
+}
+
+function listRooms(bodyText) {
+  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
+  const rooms = [];
+  const seen = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    if (isRoomName(lines, i)) {
+      const name = lines[i];
+      const key = name.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); rooms.push(name); }
+    }
+  }
+  return rooms;
+}
+
 // ---- HTTP Handler ------------------------------------------------------------------------
 
 module.exports = async (req, res) => {
@@ -434,7 +470,45 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ success: false, reason: 'method_not_allowed' }); return; }
 
-  const { link, room, board, cancel, turnstileToken } = req.body || {};
+  const { link, room, board, cancel, mode, turnstileToken } = req.body || {};
+
+  // Modus "rooms": nur die Zimmerliste des Hotels laden (fuer das Auswahl-Dropdown im Formular).
+  // Ein einziger Seitenabruf ueber das Ausgangsland, kein Laendervergleich. Kein Turnstile noetig
+  // (leichter, seltener Abruf), aber weiterhin Proxy-/Link-Pruefung.
+  if (mode === 'rooms') {
+    if (!link || !/^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i.test(link)) {
+      res.status(400).json({ success: false, reason: 'invalid_link' });
+      return;
+    }
+    const up = process.env.SMARTPROXY_USER_PREFIX;
+    const pw = process.env.SMARTPROXY_PASSWORD;
+    const srv = process.env.SMARTPROXY_SERVER || 'http://proxy.smartproxy.net:3120';
+    if (!up || !pw) { res.status(200).json({ success: false, reason: 'proxy_not_configured' }); return; }
+    try {
+      try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
+      const baselineCountry = detectBaselineCountry(link);
+
+      // 1) OHNE Proxy versuchen (kostet nichts) - Zimmernamen sind laenderunabhaengig.
+      let bodyText = null;
+      {
+        const r = await attemptFetch(link, null, null);
+        if (r.loadedOk && listRooms(r.bodyText).length) bodyText = r.bodyText;
+      }
+      // 2) Nur falls Booking den Server-IP blockt (leere/geblockte Seite): ueber Proxy laden.
+      if (!bodyText) {
+        const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
+        for (let a = 1; a <= 2 && !bodyText; a++) {
+          const r = await attemptFetch(link, srv, proxyAuth);
+          if (r.loadedOk && listRooms(r.bodyText).length) bodyText = r.bodyText;
+        }
+      }
+      if (!bodyText) { res.status(200).json({ success: false, reason: 'rooms_not_loaded' }); return; }
+      res.status(200).json({ success: true, rooms: listRooms(bodyText), baselineCountry });
+    } catch (err) {
+      res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
+    }
+    return;
+  }
 
   const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
