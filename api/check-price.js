@@ -228,8 +228,19 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   const normDe = (s) => (s || '').toLowerCase()
     .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
     .replace(/[\s-]/g, '');
+  // Tarif-Verpflegung ueber die Mahlzeiten-Zeile bestimmen (gleiche Logik wie beim Laden der
+  // Optionen), damit z.B. "Frühstück, Mittagessen & Abendessen" korrekt als Vollpension zaehlt.
+  const boardOfCtx = (ctx) => {
+    for (const line of (ctx || '').split('\n')) {
+      const b = boardOfLine(line);
+      if (b) return b;
+    }
+    return null;
+  };
   const matchesBoard = (ctx) => {
     if (!boardType || boardType === 'egal') return true;
+    const b = boardOfCtx(ctx);
+    if (b) return b === boardType;
     return normDe(ctx).includes(normDe(boardType));
   };
   // Booking-Formulierungen: "Kostenlose Stornierung vor dem ..." (erstattbar) vs
@@ -555,15 +566,25 @@ function listRooms(bodyText) {
 // Verpflegungs-/Storno-Tokens aus einem Textabschnitt bestimmen (identisch zur In-Page-Logik,
 // hier aber im Node-Kontext, damit wir die Optionen layout-unabhaengig direkt aus dem Seitentext
 // je Zimmer ableiten koennen - die DOM-Tabellenerkennung greift nicht auf allen Booking-Layouts).
+// Verpflegung ZEILENWEISE klassifizieren: Booking schreibt die Verpflegung je Tarif in EINE Zeile
+// ("Frühstück inbegriffen" / "Frühstück & Abendessen inbegriffen" = Halbpension / "Frühstück,
+// Mittagessen & Abendessen inbegriffen" = Vollpension). Nur so wird jeder Tarif korrekt getrennt.
+function boardOfLine(line) {
+  const l = (line || '').toLowerCase();
+  if (/all[-\s]?inclusive/.test(l)) return 'allinclusive';
+  if (/vollpension|mittagessen/.test(l)) return 'vollpension';
+  if (/halbpension|abendessen/.test(l)) return 'halbpension';
+  if (/fr(ü|ue)hst(ü|ue)ck/.test(l)) return 'fruehstueck';
+  if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only|ohne verpflegung/.test(l)) return 'uebernachtung';
+  return null;
+}
 function boardsFromText(t) {
-  t = (t || '').toLowerCase();
-  const b = [];
-  if (/all[-\s]?inclusive/.test(t)) b.push('allinclusive');
-  if (/vollpension/.test(t)) b.push('vollpension');
-  if (/halbpension|abendessen inbegriffen/.test(t)) b.push('halbpension');
-  if (/fr(ü|ue)hst(ü|ue)ck/.test(t)) b.push('fruehstueck');
-  if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only/.test(t)) b.push('uebernachtung');
-  return [...new Set(b)];
+  const set = new Set();
+  for (const line of (t || '').split('\n')) {
+    const b = boardOfLine(line);
+    if (b) set.add(b);
+  }
+  return [...set];
 }
 function cancelsFromText(t) {
   t = (t || '').toLowerCase();
@@ -603,10 +624,11 @@ function enrichRoomOptions(bodyText, rooms) {
   const opts = computeRoomOptions(bodyText, rooms.map((r) => r.name));
   return rooms.map((r) => {
     const c = opts[r.name] || { boards: [], cancels: [] };
+    // Text-Erkennung (zeilenweise) hat Vorrang - sie ist am genauesten; DOM nur als Rueckfall.
     return {
       name: r.name,
-      boards: r.boards && r.boards.length ? r.boards : c.boards,
-      cancels: r.cancels && r.cancels.length ? r.cancels : c.cancels,
+      boards: c.boards.length ? c.boards : (r.boards || []),
+      cancels: c.cancels.length ? c.cancels : (r.cancels || []),
     };
   });
 }
