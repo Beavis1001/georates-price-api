@@ -2,8 +2,7 @@
   "functions": {
     "api/check-price.js": {
       "maxDuration": 60,
-      "memory": 1536,
-      "includeFiles": "node_modules/@sparticuz/chromium/bin/**"
+      "memory": 1536
     }
   }
 }
