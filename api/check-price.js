@@ -466,11 +466,18 @@ module.exports = async (req, res) => {
     }
 
     if (!probeConclusive) {
+      // Die restlichen Laender in kleinen PARALLELEN Gruppen pruefen (nicht einzeln
+      // nacheinander - das dauerte fast 60s). Chromium ist nach der Probe bereits entpackt,
+      // daher ist Parallelitaet jetzt gefahrlos; die Gruppengroesse begrenzt den Arbeitsspeicher.
       const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
-      for (const country of remaining) {
+      const BATCH_SIZE = 2;
+      for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
         if (Date.now() - startTime > TIME_BUDGET_MS) { partial = true; break; }
-        const r = await fetchPrice(country, link, proxyServer, userPrefix, password, room, board, rates);
-        results.push(r);
+        const batch = remaining.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, rates))
+        );
+        results.push(...batchResults);
       }
       summary = summarize(results, baselineCountry);
     }
