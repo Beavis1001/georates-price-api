@@ -245,14 +245,18 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   };
   // Booking-Formulierungen: "Kostenlose Stornierung vor dem ..." (erstattbar) vs
   // "Nicht kostenlos stornierbar" (nicht erstattbar).
-  const isFree = (ctx) => /kostenlose stornierung|kostenlos stornierbar/i.test(ctx);
-  const isPartial = (ctx) => /teilweise erstattbar/i.test(ctx);
-  const isNonRef = (ctx) => /nicht kostenlos stornierbar|nicht erstattbar|keine kostenlose stornierung/i.test(ctx);
+  const cancelOfCtx = (ctx) => {
+    for (const line of (ctx || '').split('\n')) {
+      const c = cancelOfLine(line);
+      if (c) return c;
+    }
+    return null;
+  };
   const matchesCancel = (ctx) => {
-    if (cancelPref === 'ja') return isFree(ctx);
-    if (cancelPref === 'teilweise') return isPartial(ctx);
-    if (cancelPref === 'nein') return isNonRef(ctx);
-    return true; // "unsicher"/leer -> egal
+    if (!cancelPref || cancelPref === 'unsicher') return true;
+    const c = cancelOfCtx(ctx);
+    if (c) return c === cancelPref;
+    return true; // keine Storno-Info im Tarif -> nicht ausschliessen
   };
 
   // Auswahl-Priorität: 1) Verpflegung UND Stornier-Wunsch, 2) nur Verpflegung,
@@ -574,8 +578,21 @@ function boardOfLine(line) {
   if (/all[-\s]?inclusive/.test(l)) return 'allinclusive';
   if (/vollpension|mittagessen/.test(l)) return 'vollpension';
   if (/halbpension|abendessen/.test(l)) return 'halbpension';
-  if (/fr(ü|ue)hst(ü|ue)ck/.test(l)) return 'fruehstueck';
+  if (/fr(ü|ue)hst(ü|ue)ck/.test(l)) {
+    if (/inbegriffen|inklus/.test(l)) return 'fruehstueck';   // "Frühstück inbegriffen"
+    if (/€|eur|usd|\$|\d/.test(l)) return 'uebernachtung';     // "Frühstück € 23" = Aufpreis, NICHT inkl.
+    return 'fruehstueck';
+  }
   if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only|ohne verpflegung/.test(l)) return 'uebernachtung';
+  return null;
+}
+// Storno ZEILENWEISE, und "nicht ..." VOR "kostenlos" pruefen - sonst matcht "Nicht kostenlos
+// stornierbar" faelschlich als kostenlos (der Teilstring "kostenlos stornierbar" steckt darin).
+function cancelOfLine(line) {
+  const l = (line || '').toLowerCase();
+  if (/nicht kostenlos stornierbar|nicht erstattbar|keine kostenlose stornierung/.test(l)) return 'nein';
+  if (/teilweise erstattbar/.test(l)) return 'teilweise';
+  if (/kostenlose stornierung|kostenlos stornierbar/.test(l)) return 'ja';
   return null;
 }
 function boardsFromText(t) {
@@ -587,12 +604,12 @@ function boardsFromText(t) {
   return [...set];
 }
 function cancelsFromText(t) {
-  t = (t || '').toLowerCase();
-  const c = [];
-  if (/kostenlose stornierung|kostenlos stornierbar/.test(t)) c.push('ja');
-  if (/teilweise erstattbar/.test(t)) c.push('teilweise');
-  if (/nicht erstattbar|nicht kostenlos stornierbar|keine kostenlose stornierung/.test(t)) c.push('nein');
-  return [...new Set(c)];
+  const set = new Set();
+  for (const line of (t || '').split('\n')) {
+    const c = cancelOfLine(line);
+    if (c) set.add(c);
+  }
+  return [...set];
 }
 
 // Fuer jeden Zimmernamen den Textabschnitt vom ersten Vorkommen bis zum naechsten Zimmernamen
