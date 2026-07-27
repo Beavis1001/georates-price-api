@@ -514,6 +514,30 @@ async function cacheSet(key, value) {
   } catch (e) { /* ignorieren - Cache ist nur Optimierung, kein kritischer Pfad */ }
 }
 
+// ---- Abfrage-Log (optional, an eine Google-Tabelle via Apps-Script-Webhook) ----------------
+
+const LOG_BOARD_LABEL = { uebernachtung: 'Nur Übernachtung', fruehstueck: 'Frühstück', halbpension: 'Halbpension', vollpension: 'Vollpension', allinclusive: 'All-Inclusive', egal: 'Egal' };
+const LOG_CANCEL_LABEL = { ja: 'Kostenlos stornierbar', teilweise: 'Teilweise erstattbar', nein: 'Nicht kostenlos stornierbar', unsicher: 'Egal' };
+const LOG_COUNTRY_LABEL = { DE: 'Deutschland', CO: 'Kolumbien', AR: 'Argentinien', EG: 'Ägypten', IN: 'Indien', VN: 'Vietnam', ID: 'Indonesien', PK: 'Pakistan', LK: 'Sri Lanka', PE: 'Peru', MX: 'Mexiko', PH: 'Philippinen', TH: 'Thailand', US: 'USA', JP: 'Japan' };
+
+// Schreibt EINE Zeile pro Abfrage in die Google-Tabelle. Fehler werden verschluckt - das Logging
+// darf den Preis-Check niemals blockieren oder verzoegern.
+async function logQuery(entry) {
+  const url = process.env.LOG_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 4000);
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: process.env.LOG_WEBHOOK_TOKEN || '', ...entry }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(to);
+  } catch (e) { /* Logging ist optional - nie den Check gefaehrden */ }
+}
+
 // ---- Gesamtergebnis aus Einzelländern ableiten --------------------------------------------
 
 function summarize(results, baselineCountry) {
@@ -815,7 +839,26 @@ module.exports = async (req, res) => {
     }
 
     const payload = { ...summary, partial };
-    if (summary.success) await cacheSet(cacheKey, summary);
+    if (summary.success) {
+      await cacheSet(cacheKey, summary);
+      // Jede (neue) erfolgreiche Abfrage in die Google-Tabelle loggen - als Deal-Sammlung.
+      const baseRow = results.find((r) => r.country === baselineCountry);
+      const best = summary.best;
+      const basePrice = baseRow && baseRow.priceEuro != null ? baseRow.priceEuro : null;
+      await logQuery({
+        hotelLink: link,
+        room: room || '',
+        board: LOG_BOARD_LABEL[board] || board || '',
+        cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
+        baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry,
+        baselinePreisEuro: basePrice != null ? basePrice : '',
+        bestesLand: LOG_COUNTRY_LABEL[best.country] || best.country,
+        bestPreisEuro: best.priceEuro != null ? best.priceEuro : '',
+        bestPreisVorOrt: best.priceLocal != null ? `${best.priceLocal} ${best.currency}` : '',
+        ersparnisProzent: summary.savingsPct != null ? summary.savingsPct : '',
+        ersparnisEuro: basePrice != null && best.priceEuro != null ? Math.round((basePrice - best.priceEuro) * 100) / 100 : '',
+      });
+    }
     res.status(200).json(payload);
   } catch (err) {
     res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
