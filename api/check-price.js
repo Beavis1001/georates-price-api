@@ -364,10 +364,11 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
         // Tarifzeile; Folgezeilen gehoeren zum selben (zuletzt gesehenen) Zimmer.
         for (const tbl of document.querySelectorAll('table')) {
           const ths = [...tbl.querySelectorAll('th')].map((th) => (th.innerText || '').toLowerCase());
-          if (!ths.some((h) => /zimmerkategorie|unterkunftstyp|zimmertyp|room type/.test(h))) continue;
+          if (!ths.some((h) => /zimmerkategorie|unterkunftstyp|zimmertyp|art der unterbringung|unterbringungsart|room type|accommodation type/.test(h))) continue;
           let cur = null;
           for (const row of tbl.querySelectorAll('tr')) {
-            const firstTd = [...row.children].find((c) => c.tagName === 'TD');
+            // Zimmernamen stehen je nach Layout in TD ODER in einer TH-Zeilenkopfzelle.
+            const firstTd = [...row.children].find((c) => c.tagName === 'TD' || c.tagName === 'TH');
             if (!firstTd) continue;
             const a = firstTd.querySelector('a');
             const nm = a ? clean(a.innerText) : '';
@@ -743,7 +744,20 @@ module.exports = async (req, res) => {
         return;
       }
       const payload = { success: true, rooms, baselineCountry };
-      if (req.body && req.body.debug && lastR) payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length };
+      if (req.body && req.body.debug && lastR) {
+        payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk };
+        // Diagnose: die echte Preis-Erkennung gegen den vom Server geladenen Seitentext testen.
+        try {
+          const bt = lastR.bodyText || '';
+          const ls = bt.split('\n').map((l) => l.trim()).filter(Boolean);
+          payload.dbg.lineCount = ls.length;
+          payload.dbg.minLines = MIN_LOADED_LINES;
+          const rn = (rooms && rooms[0] && rooms[0].name) || '';
+          const idx = ls.findIndex((l) => l.toLowerCase().startsWith(rn.toLowerCase()));
+          const [amt] = rn ? findRoomPrice(bt, rn, '', '') : [null];
+          payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + 22) : [] };
+        } catch (e) { payload.dbg.probeErr = String(e); }
+      }
       res.status(200).json(payload);
     } catch (err) {
       res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
