@@ -85,7 +85,18 @@ function detectBaselineCountry(link) {
   return DEFAULT_BASELINE_COUNTRY;
 }
 
-const BLOCKED_RESOURCE_TYPES = new Set(['image', 'media', 'font', 'stylesheet', 'other']);
+// ---- Proxy-Traffic sparen -----------------------------------------------------------------
+// Jedes geladene Byte kostet Guthaben. Fuer die Preiserkennung brauchen wir nur das HTML der
+// Hotelseite und Bookings eigene Skripte - Bilder, Schriften, Videos, Tracker und alle
+// Drittanbieter-Domains werden hart geblockt.
+const BLOCKED_RESOURCE_TYPES = new Set([
+  'image', 'media', 'font', 'stylesheet', 'other',
+  'texttrack', 'websocket', 'manifest', 'eventsource', 'ping', 'cspviolationreport',
+]);
+// Nur Bookings eigene Domains duerfen laden (bstatic.com ist Bookings Asset-CDN).
+const ALLOWED_HOST_RE = /(^|\.)booking\.com$|(^|\.)bstatic\.com$/i;
+// Bekannte Tracker/Werbenetze - sicherheitshalber explizit, falls sie unter booking.com laufen.
+const TRACKER_HOST_RE = /google-analytics|googletagmanager|doubleclick|googlesyndication|googleadservices|gstatic|connect\.facebook|facebook\.net|criteo|hotjar|segment\.(io|com)|newrelic|nr-data|sentry|adsrvr|taboola|outbrain|bat\.bing|clarity\.ms|amplitude|mixpanel|optimizely|quantserve|scorecardresearch|adnxs|pubmatic|rubiconproject|casalemedia|tiktok|snapchat|pinterest|twitter|cloudflareinsights|onetrust|cookielaw/i;
 
 // ---- Live-Wechselkurse (tagesaktuell, EUR-Basis, kostenlos ohne API-Key) -----------------
 // Wichtig: Der Vergleich ist nur so verlaesslich wie der Wechselkurs. Deshalb werden zwei
@@ -316,8 +327,22 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
 
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      if (BLOCKED_RESOURCE_TYPES.has(req.resourceType())) req.abort();
-      else req.continue();
+      try {
+        if (BLOCKED_RESOURCE_TYPES.has(req.resourceType())) return req.abort();
+        const host = new URL(req.url()).hostname;
+        if (TRACKER_HOST_RE.test(host)) return req.abort();
+        if (!ALLOWED_HOST_RE.test(host)) return req.abort(); // alle Drittanbieter-Domains
+        return req.continue();
+      } catch (e) {
+        try { return req.continue(); } catch (e2) { /* Request bereits behandelt */ }
+      }
+    });
+
+    // Groben Traffic mitzaehlen, um den Proxy-Verbrauch messbar zu machen.
+    let transferBytes = 0;
+    page.on('response', (res) => {
+      const len = parseInt((res.headers() || {})['content-length'] || '0', 10);
+      if (!Number.isNaN(len)) transferBytes += len;
     });
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 13000 });
@@ -428,7 +453,8 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     const lineCount = bodyText.split('\n').length;
     const hasRoomTable = /Zimmerkategorie|Art der Unterbringung|Unterkunftstyp|Zimmertyp|Preis für/i.test(bodyText);
     const loadedOk = hasRoomTable ? lineCount >= 80 : lineCount >= MIN_LOADED_LINES;
-    return { bodyText, rooms: roomData, roomMeta, loadedOk, err: null };
+    console.log(`[attemptFetch] geladen: ${(transferBytes / 1024).toFixed(0)} KB (${lineCount} Zeilen)`);
+    return { bodyText, rooms: roomData, roomMeta, loadedOk, transferBytes, err: null };
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
@@ -777,7 +803,7 @@ module.exports = async (req, res) => {
       }
       const payload = { success: true, rooms, baselineCountry };
       if (req.body && req.body.debug && lastR) {
-        payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk };
+        payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk, transferKB: Math.round((lastR.transferBytes || 0) / 1024) };
         // Diagnose: die echte Preis-Erkennung gegen den vom Server geladenen Seitentext testen.
         try {
           const bt = lastR.bodyText || '';
