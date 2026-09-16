@@ -331,7 +331,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
 
     try {
       await page.waitForFunction(
-        () => /Zimmerkategorie|Preis für/i.test(document.body.innerText),
+        () => !!document.body && /Zimmerkategorie|Preis für|Art der Unterbringung/i.test(document.body.innerText),
         { timeout: 6000 }
       );
     } catch (e) {
@@ -343,7 +343,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
       await new Promise((r) => setTimeout(r, 1200));
     } catch (e) { /* ignorieren */ }
 
-    const bodyText = await page.evaluate(() => document.body.innerText);
+    // Null-sicher: unter Last kann document.body beim Auslesen noch fehlen - das darf den
+    // gesamten Abruf nicht abbrechen lassen.
+    const bodyText = await page.evaluate(() => (document.body && document.body.innerText) || '');
 
     // Zimmer direkt aus dem DOM der Zimmertabelle lesen: pro Zeile der erste Link (= der blaue
     // Zimmername, exakt was der Nutzer sieht) plus die in DIESEM Zimmerblock real vorhandenen
@@ -411,8 +413,8 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
           strategy,
           tablesTotal,
           firstOptSample: order.length ? (map[order[0]] || '').slice(0, 260) : '',
-          bodyHasFruehstueck: /fr(ü|ue)hst(ü|ue)ck/i.test(document.body.innerText),
-          bodyHasStorno: /stornier/i.test(document.body.innerText),
+          bodyHasFruehstueck: /fr(ü|ue)hst(ü|ue)ck/i.test((document.body && document.body.innerText) || ''),
+          bodyHasStorno: /stornier/i.test((document.body && document.body.innerText) || ''),
         };
         return { rooms, meta };
       });
