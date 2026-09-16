@@ -45,7 +45,7 @@ const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
 // Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
 const MAX_ATTEMPTS = 2;
 const EXPANSION_ATTEMPTS = 1;
-const BATCH_SIZE = 3;            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
+const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessigeres Laden            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
 const MIN_LOADED_LINES = 300;
 // Vor jeder neuen Ländergruppe pruefen: ist mehr Zeit als dieses Budget verstrichen, wird
 // abgebrochen. 36s + max. eine ~20s-Gruppe + Antwort bleibt sicher unter dem 60s-Limit.
@@ -790,10 +790,18 @@ module.exports = async (req, res) => {
           payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + 22) : [] };
           // Mit debug:'price' den ECHTEN Preis-Pfad fuers Ausgangsland durchlaufen lassen.
           if (req.body.debug === 'price' && rn) {
+            // Ohne zweiten Browserstart: die Preis-Kette auf dem BEREITS geladenen Seitentext pruefen.
             const rr = await getLiveRates();
-            const pr = await fetchPrice(baselineCountry, link, srv, up, pw,
-              (req.body.room || rn), req.body.board || '', req.body.cancel || '', rr || {}, 1);
-            payload.dbg.pricePath = { ratesOk: !!rr, usdRate: rr ? rr.USD : null, eurRate: rr ? rr.EUR : null, result: pr };
+            const useRoom = req.body.room || rn;
+            const [amt2, , curTok] = findRoomPrice(bt, useRoom, req.body.board || '', req.body.cancel || '');
+            const cur = normalizeCurrency(curTok, DEFAULT_CURRENCY_BY_COUNTRY[baselineCountry] || 'EUR');
+            const val = parseAmount(amt2);
+            const rate = rr && rr[cur];
+            payload.dbg.pricePath = {
+              ratesOk: !!rr, room: useRoom, rawAmount: amt2, currencyToken: curTok, currency: cur,
+              value: val, rate: rate || null,
+              priceEuro: (val !== null && rate) ? Math.round(val * rate * 100) / 100 : null,
+            };
           }
         } catch (e) { payload.dbg.probeErr = String(e); }
       }
