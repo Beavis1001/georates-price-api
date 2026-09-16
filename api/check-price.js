@@ -200,15 +200,16 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
     const pm = PRICE_PREFIX_RE.exec(lines[k]);
     if (pm) {
       lastAmountLine = k;
-      rawTiers.push({ amount: pm[2], anchor: k });
+      rawTiers.push({ amount: pm[2], cur: pm[1], anchor: k });
     } else if (TAX_LINE_RE.test(lines[k])) {
       let amount = null;
+      let cur = null;
       for (let back = k - 1; back > Math.max(k - 1 - BACKSCAN_LINES, start); back--) {
         const m = AMOUNT_LINE_RE.exec(lines[back]);
-        if (m) { amount = m[2]; break; }
+        if (m) { amount = m[2]; cur = m[1]; break; }
         if (back === lastAmountLine) break;
       }
-      if (amount) rawTiers.push({ amount, anchor: k });
+      if (amount) rawTiers.push({ amount, cur, anchor: k });
     }
     k++;
   }
@@ -220,7 +221,7 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   const tiers = rawTiers.map((t, i) => {
     const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : lines.length;
     const end = Math.min(nextAnchor, t.anchor + 14);
-    return [t.amount, lines.slice(t.anchor, end).join('\n')];
+    return [t.amount, lines.slice(t.anchor, end).join('\n'), t.cur];
   });
 
   // Deutsche Umlaute vereinheitlichen, damit z.B. Formularwert "fruehstueck" zu "Frühstück"
@@ -265,6 +266,25 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
   for (const t of tiers) if (matchesBoard(t[1])) return t;
   for (const t of tiers) if (matchesCancel(t[1])) return t;
   return tiers[0];
+}
+
+// Waehrungssymbol/-kuerzel aus der Preiszeile in einen ISO-Code uebersetzen. Booking zeigt je
+// nach Hotel/Sitzung z.B. "US$2.238" auch in einer deutschen Sitzung - deshalb richtet sich die
+// Umrechnung nach der TATSAECHLICH angezeigten Waehrung, nicht nach dem Land des Proxys.
+const CURRENCY_SYMBOLS = {
+  '€': 'EUR', '$': 'USD', 'US$': 'USD', 'USD$': 'USD', '£': 'GBP', '¥': 'JPY', 'CN¥': 'CNY',
+  'R$': 'BRL', 'CA$': 'CAD', 'A$': 'AUD', 'NZ$': 'NZD', 'MX$': 'MXN', 'AR$': 'ARS', 'CO$': 'COP',
+  '₺': 'TRY', '₹': 'INR', '₫': 'VND', '₱': 'PHP', '฿': 'THB', '₪': 'ILS', '₩': 'KRW', 'RP': 'IDR',
+  'E£': 'EGP', 'EG£': 'EGP', '₨': 'PKR', 'S/': 'PEN', 'S/.': 'PEN', 'CHF': 'CHF',
+};
+function normalizeCurrency(tok, fallback) {
+  if (!tok) return fallback;
+  const t = String(tok).trim().replace(/\s+/g, '');
+  if (CURRENCY_SYMBOLS[t]) return CURRENCY_SYMBOLS[t];
+  const up = t.toUpperCase();
+  if (CURRENCY_SYMBOLS[up]) return CURRENCY_SYMBOLS[up];
+  if (/^[A-Z]{3}$/.test(up)) return up;
+  return fallback;
 }
 
 function detectSessionCurrency(bodyText) {
@@ -427,7 +447,11 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     lastErr = r.err;
     if (loadedOk && expectedCurrency) {
       const seen = detectSessionCurrency(bodyText);
-      if (seen && seen !== expectedCurrency) loadedOk = false;
+      // Nur protokollieren, NICHT verwerfen: Booking zeigt z.B. bei US-Hotels auch in einer
+      // deutschen Sitzung US-Dollar. Die Umrechnung erfolgt unten anhand der echten Waehrung.
+      if (seen && seen !== expectedCurrency) {
+        console.log(`[fetchPrice] ${countryCode}: Sitzungswaehrung ${seen} statt ${expectedCurrency}`);
+      }
     }
     if (loadedOk) break;
   }
@@ -439,8 +463,9 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     return result;
   }
 
-  const currency = expectedCurrency || 'EUR';
-  const [rawAmt, ctx] = findRoomPrice(bodyText, room, board, cancel);
+  const [rawAmt, ctx, curTok] = findRoomPrice(bodyText, room, board, cancel);
+  // Waehrung aus der tatsaechlichen Preiszeile ableiten (Fallback: Landeswaehrung).
+  const currency = normalizeCurrency(curTok, expectedCurrency || 'EUR');
   if (rawAmt) {
     let val = parseAmount(rawAmt);
     const taxPct = extractExclusiveTaxPct(ctx);
