@@ -40,6 +40,10 @@ const DEFAULT_BASELINE_COUNTRY = 'DE';
 // Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
 // Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
+// Unterhalb dieser Schwelle ist ein Preisunterschied blosses Rauschen (Wechselkurs-Rundung,
+// Nachkommastellen). Solche Treffer werden NICHT als "guenstigeres Land" verkauft - weder im
+// Ergebnis noch im Deal-Log. Sonst wirkt das Tool, als wolle es um jeden Preis etwas finden.
+const RELEVANT_SAVINGS_PCT = 1.0;
 // Ausgangsland + Kolumbien: 2 Versuche (Referenzpreis MUSS verlaesslich sein). Dank der kurzen
 // Einzel-Timeouts unten bleiben selbst 2 Versuche pro Land klar unter dem 60s-Limit von Vercel.
 // Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
@@ -611,7 +615,9 @@ function summarize(results, baselineCountry) {
     savingsPct = Math.round(((baseline.priceEuro - best.priceEuro) / baseline.priceEuro) * 1000) / 10;
     if (savingsPct >= PROBE_CONFIDENCE_THRESHOLD_PCT) recommendVpnCountry = best.country;
   }
-  return { success: true, results, best, savingsPct, recommendVpnCountry, baselineCountry };
+  // Nur ab RELEVANT_SAVINGS_PCT sprechen wir ueberhaupt von einem Unterschied.
+  const relevantSaving = savingsPct != null && savingsPct >= RELEVANT_SAVINGS_PCT;
+  return { success: true, results, best, savingsPct, relevantSaving, recommendVpnCountry, baselineCountry };
 }
 
 // ---- Alle Zimmernamen einer Hotelseite auflisten (fuer das Dropdown im Formular) ----------
@@ -845,11 +851,38 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // Herkunftsland des Besuchers (setzt Vercel am Edge). Nur das Laenderkuerzel, keine IP.
+  const visitorCountry = String(req.headers['x-vercel-ip-country'] || '').toUpperCase();
+  const herkunftsland = LOG_COUNTRY_LABEL[visitorCountry] || visitorCountry || 'unbekannt';
+
+  // Jede Abfrage protokollieren - auch die erfolglosen. Die zeigen Traffic und belegen, dass die
+  // Seite benutzt wird; ausserdem sieht man an den Status-Werten sofort, wo es klemmt.
+  const logAttempt = (status, extra) => logQuery({
+    hotelLink: link || '',
+    room: room || '',
+    board: LOG_BOARD_LABEL[board] || board || '',
+    cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
+    baselineLand: '',
+    baselinePreisEuro: '',
+    bestesLand: '',
+    bestPreisEuro: '',
+    bestPreisVorOrt: '',
+    ersparnisProzent: '',
+    ersparnisEuro: '',
+    herkunftsland,
+    relevant: 'nein',
+    empfehlung: 'nein',
+    status,
+    ...(extra || {}),
+  });
+
   if (!link || !/^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i.test(link)) {
+    await logAttempt('kein gültiger Booking-Link');
     res.status(400).json({ success: false, reason: 'invalid_link' });
     return;
   }
   if (!room) {
+    await logAttempt('kein Zimmer angegeben');
     res.status(400).json({ success: false, reason: 'missing_room' });
     return;
   }
@@ -857,6 +890,7 @@ module.exports = async (req, res) => {
   const cacheKey = cacheKeyFor(link, room, board || '', cancel || '');
   const cached = await cacheGet(cacheKey);
   if (cached) {
+    await logAttempt('aus Cache');
     res.status(200).json({ ...cached, fromCache: true });
     return;
   }
@@ -874,6 +908,7 @@ module.exports = async (req, res) => {
     // wertlos. Sind beide Quellen nicht erreichbar, brechen wir sauber ab.
     const rates = await getLiveRates();
     if (!rates) {
+      await logAttempt('Wechselkurse nicht erreichbar');
       res.status(200).json({ success: false, reason: 'fx_unavailable' });
       return;
     }
@@ -944,10 +979,19 @@ module.exports = async (req, res) => {
         bestPreisVorOrt: best.priceLocal != null ? `${best.priceLocal} ${best.currency}` : '',
         ersparnisProzent: summary.savingsPct != null ? summary.savingsPct : '',
         ersparnisEuro: basePrice != null && best.priceEuro != null ? Math.round((basePrice - best.priceEuro) * 100) / 100 : '',
+        // "ja" nur bei einem Unterschied, der kein Rundungsrauschen ist - so laesst sich die
+        // Tabelle nach echten Funden filtern, statt 0,1-%-Treffer mitzuzaehlen.
+        relevant: summary.relevantSaving ? 'ja' : 'nein',
+        empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
+        herkunftsland,
+        status: partial ? 'ok (Zeitbudget, nicht alle Länder)' : 'ok',
       });
+    } else {
+      await logAttempt('kein Preis gefunden', { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
     res.status(200).json(payload);
   } catch (err) {
+    try { await logAttempt('Fehler: ' + String((err && err.message) || err).slice(0, 120)); } catch (e) { /* Logging ist optional */ }
     res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
   }
 };
