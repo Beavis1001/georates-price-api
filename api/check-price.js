@@ -332,7 +332,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     try {
       await page.waitForFunction(
         () => !!document.body && /Zimmerkategorie|Preis für|Art der Unterbringung/i.test(document.body.innerText),
-        { timeout: 6000 }
+        { timeout: 9000 }
       );
     } catch (e) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -423,7 +423,12 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     } catch (e) { roomData = []; }
 
     await browser.close();
-    return { bodyText, rooms: roomData, roomMeta, loadedOk: bodyText.split('\n').length >= MIN_LOADED_LINES, err: null };
+    // "Geladen" heisst: die Zimmer-/Preistabelle ist wirklich da. Eine starre Zeilenzahl hat
+    // schwere Seiten faelschlich verworfen, obwohl Zimmer und Preise vorhanden waren.
+    const lineCount = bodyText.split('\n').length;
+    const hasRoomTable = /Zimmerkategorie|Art der Unterbringung|Unterkunftstyp|Zimmertyp|Preis für/i.test(bodyText);
+    const loadedOk = hasRoomTable ? lineCount >= 80 : lineCount >= MIN_LOADED_LINES;
+    return { bodyText, rooms: roomData, roomMeta, loadedOk, err: null };
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
