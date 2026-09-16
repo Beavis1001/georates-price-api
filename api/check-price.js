@@ -781,6 +781,13 @@ module.exports = async (req, res) => {
           const idx = ls.findIndex((l) => l.toLowerCase().startsWith(rn.toLowerCase()));
           const [amt] = rn ? findRoomPrice(bt, rn, '', '') : [null];
           payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + 22) : [] };
+          // Mit debug:'price' den ECHTEN Preis-Pfad fuers Ausgangsland durchlaufen lassen.
+          if (req.body.debug === 'price' && rn) {
+            const rr = await getLiveRates();
+            const pr = await fetchPrice(baselineCountry, link, srv, up, pw,
+              (req.body.room || rn), req.body.board || '', req.body.cancel || '', rr || {}, 1);
+            payload.dbg.pricePath = { ratesOk: !!rr, usdRate: rr ? rr.USD : null, eurRate: rr ? rr.EUR : null, result: pr };
+          }
         } catch (e) { payload.dbg.probeErr = String(e); }
       }
       res.status(200).json(payload);
