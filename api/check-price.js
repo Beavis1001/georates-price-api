@@ -260,14 +260,28 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
       lastAmountLine = k;
       rawTiers.push({ amount: pm[2], cur: pm[1], anchor: k });
     } else if (TAX_LINE_RE.test(lines[k])) {
-      let amount = null;
-      let cur = null;
-      for (let back = k - 1; back > Math.max(k - 1 - BACKSCAN_LINES, start); back--) {
-        const m = AMOUNT_LINE_RE.exec(lines[back]);
-        if (m) { amount = m[2]; cur = m[1]; break; }
-        if (back === lastAmountLine) break;
+      // "Einschliesslich Steuern und Gebühren" steht IMMER direkt unter dem zugehoerigen
+      // Preis. Hat dieser Preis eine Zeile vorher schon eine Ratenstufe erzeugt, darf hier
+      // keine zweite fuer denselben Betrag entstehen.
+      //
+      // Genau das ist am 17.09. passiert und hat den falschen Preis geliefert. Booking gibt
+      // aus: "Preis € 1.523" / "Einschliesslich Steuern und Gebühren" / "Nicht kostenlos
+      // stornierbar". Die doppelte Stufe hatte als Kontext nur die eine Zeile "Preis € 1.523",
+      // weil die naechste Stufe unmittelbar folgte - also KEINE Storno-Angabe. Und eine Stufe
+      // ohne Storno-Angabe gilt unten als "nicht ausschliessbar", rutschte damit durch die
+      // Auswahl und verdraengte die tatsaechlich kostenlos stornierbare Rate zu 1.589 EUR.
+      const letzte = rawTiers.length ? rawTiers[rawTiers.length - 1] : null;
+      const gehoertZurLetztenStufe = letzte && (k - letzte.anchor) <= 2;
+      if (!gehoertZurLetztenStufe) {
+        let amount = null;
+        let cur = null;
+        for (let back = k - 1; back > Math.max(k - 1 - BACKSCAN_LINES, start); back--) {
+          if (back === lastAmountLine) break;
+          const m = AMOUNT_LINE_RE.exec(lines[back]);
+          if (m) { amount = m[2]; cur = m[1]; break; }
+        }
+        if (amount) rawTiers.push({ amount, cur, anchor: k });
       }
-      if (amount) rawTiers.push({ amount, cur, anchor: k });
     }
     k++;
   }
@@ -318,8 +332,22 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
     return true; // keine Storno-Info im Tarif -> nicht ausschliessen
   };
 
-  // Auswahl-Priorität: 1) Verpflegung UND Stornier-Wunsch, 2) nur Verpflegung,
-  // 3) nur Stornier-Wunsch, 4) erste gefundene Stufe.
+  // Auswahl-Priorität.
+  //
+  // Entscheidend ist der Unterschied zwischen "erfuellt den Wunsch ausdruecklich" und "sagt
+  // dazu nichts". Frueher galten beide als Treffer, deshalb konnte eine Rate ohne jede
+  // Storno-Angabe die Rate verdraengen, die der Nutzer tatsaechlich wollte. Eine Rate, bei der
+  // "Kostenlose Stornierung" DASTEHT, schlaegt jetzt immer eine, bei der nichts dasteht.
+  const hatStornoInfo = (ctx) => cancelOfCtx(ctx) !== null;
+  const hatBoardInfo = (ctx) => boardOfCtx(ctx) !== null;
+  const wunschStorno = !!cancelPref && cancelPref !== 'unsicher';
+  const stornoAusdruecklichPasst = (ctx) => wunschStorno && hatStornoInfo(ctx) && matchesCancel(ctx);
+
+  // 1. Verpflegung passt UND Storno passt ausdruecklich
+  for (const t of tiers) if (matchesBoard(t[1]) && stornoAusdruecklichPasst(t[1])) return t;
+  // 2. Storno passt ausdruecklich, Verpflegung passt oder steht gar nicht dabei
+  for (const t of tiers) if ((matchesBoard(t[1]) || !hatBoardInfo(t[1])) && stornoAusdruecklichPasst(t[1])) return t;
+  // 3./4./5. wie bisher: erst beides locker, dann Verpflegung, dann Storno, dann erste Stufe
   for (const t of tiers) if (matchesBoard(t[1]) && matchesCancel(t[1])) return t;
   for (const t of tiers) if (matchesBoard(t[1])) return t;
   for (const t of tiers) if (matchesCancel(t[1])) return t;
