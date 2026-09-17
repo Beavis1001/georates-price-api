@@ -428,8 +428,30 @@ const DEVICE_PROFILES = {
   },
 };
 const DEFAULT_DEVICE = 'windows';
+// Messung vom 17.09.: Die Emulation greift - Booking liefert einer Android-Kennung eine andere
+// Seite aus. Der Parser versteht diese Seite aber NICHT. Er findet dort 11 "Zimmer" namens
+// "Zimmer", "Nichtraucherzimmer", "Familienzimmer" - das sind Filterbezeichnungen des mobilen
+// Layouts, keine Zimmerkategorien. Ergebnis waere also nicht "kein Preis", sondern ein
+// falscher Preis, der plausibel aussieht. Solche Zahlen sind schlimmer als keine.
+//
+// Deshalb: mobile Profile nur im Debug-Modus. Erst wenn das mobile Layout eigenstaendig
+// geparst wird, duerfen sie fuer echte Abfragen frei.
+const MOBILE_READY = false;
 function deviceProfile(name) {
   return DEVICE_PROFILES[String(name || '').toLowerCase()] || DEVICE_PROFILES[DEFAULT_DEVICE];
+}
+// Gibt das tatsaechlich zu verwendende Profil zurueck - und faellt bei noch nicht
+// unterstuetzten Mobilprofilen sichtbar auf Desktop zurueck, statt stillschweigend Unsinn
+// zu messen.
+function resolveDevice(wunsch, debugErlaubt) {
+  const name = String(wunsch || DEFAULT_DEVICE).toLowerCase();
+  const prof = DEVICE_PROFILES[name];
+  if (!prof) return DEFAULT_DEVICE;
+  if (prof.viewport.isMobile && !MOBILE_READY && !debugErlaubt) {
+    console.log(`[device] "${name}" angefragt, aber das mobile Layout wird noch nicht geparst - nutze ${DEFAULT_DEVICE}.`);
+    return DEFAULT_DEVICE;
+  }
+  return name;
 }
 
 // ---- Ein Land pruefen (Proxy + Headless-Chrome, Bilder/Fonts/Stylesheets geblockt) --------
@@ -1062,7 +1084,7 @@ module.exports = async (req, res) => {
       // Geraeteprofil: windows (Default), mac, android, iphone. Hier durchgereicht, damit sich
       // die Zimmerliste eines Geraets einzeln pruefen laesst - das ist der billigste Weg zu
       // sehen, ob der Parser die mobile Seitenstruktur ueberhaupt versteht.
-      const device = (req.body && req.body.device) || DEFAULT_DEVICE;
+      const device = resolveDevice(req.body && req.body.device, !!(req.body && req.body.debug));
       for (let a = 1; a <= 2 && !withOpts; a++) {
         const r = await attemptFetch(link, srv, proxyAuth, blockScripts, device);
         lastR = r;
@@ -1164,7 +1186,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', (req.body && req.body.device) || DEFAULT_DEVICE);
+  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', resolveDevice(req.body && req.body.device, false));
   const cached = await cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
@@ -1206,7 +1228,7 @@ module.exports = async (req, res) => {
 
     // Geraeteprofil gilt fuer ALLE Laender derselben Abfrage. Sonst waere der Vergleich wertlos:
     // Wir wollen den Laendereffekt messen, nicht Land gegen Geraet.
-    const device = (req.body && req.body.device) || DEFAULT_DEVICE;
+    const device = resolveDevice(req.body && req.body.device, false);
     const deviceLabel = deviceProfile(device).label;
 
     // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien) PARALLEL, je 2 Versuche (Genauigkeit).
