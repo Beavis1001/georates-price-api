@@ -798,6 +798,35 @@ const LOG_BOARD_LABEL = { uebernachtung: 'Nur Übernachtung', fruehstueck: 'Frü
 const LOG_CANCEL_LABEL = { ja: 'Kostenlos stornierbar', teilweise: 'Teilweise erstattbar', nein: 'Nicht kostenlos stornierbar', unsicher: 'Egal' };
 const LOG_COUNTRY_LABEL = { DE: 'Deutschland', CO: 'Kolumbien', AR: 'Argentinien', EG: 'Ägypten', IN: 'Indien', VN: 'Vietnam', ID: 'Indonesien', PK: 'Pakistan', LK: 'Sri Lanka', PE: 'Peru', MX: 'Mexiko', PH: 'Philippinen', TH: 'Thailand', US: 'USA', JP: 'Japan' };
 
+// Booking-Links enthalten neben Hotel und Reisedaten auch Kennungen, die nichts in einem
+// Protokoll zu suchen haben - allen voran "sid", die Kennung der Booking-SITZUNG des Nutzers.
+// Am 17.09. hat ein Forenmitglied seine eigene Hotelsuche in unserem Quelltext wiedererkannt;
+// das war der Anlass, hier aufzuraeumen.
+//
+// Entfernt werden Sitzungs-, Partner- und Tracking-Parameter. Was fuer die Auswertung
+// gebraucht wird - Hotel und Reisezeitraum - bleibt erhalten, sonst liesse sich ein alter
+// Fund spaeter nicht mehr nachmessen.
+const LOG_STRIP_PARAMS = new Set([
+  'sid', 'aid', 'label', 'sb_price_type', 'srepoch', 'srpvid', 'lang', 'soz', 'lp', '_',
+  'highlighted_blocks', 'matching_block_id', 'sr_pri_blocks', 'all_sr_blocks', 'hapos', 'hpos',
+  'dest_id', 'dest_type', 'dist', 'sr_order', 'ucfs', 'atlas_src', 'utm_source', 'utm_medium',
+  'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'msclkid',
+]);
+function linkFuersLog(link) {
+  try {
+    const u = new URL(link);
+    for (const p of [...u.searchParams.keys()]) {
+      if (LOG_STRIP_PARAMS.has(p.toLowerCase())) u.searchParams.delete(p);
+    }
+    u.hash = '';
+    return u.toString();
+  } catch (e) {
+    // Kein gueltiger Link (z.B. Tippfehler des Nutzers) - dann lieber gar nichts protokollieren
+    // als einen unkontrollierten String.
+    return '';
+  }
+}
+
 // Schreibt EINE Zeile pro Abfrage in die Google-Tabelle. Fehler werden verschluckt - das Logging
 // darf den Preis-Check niemals blockieren oder verzoegern.
 async function logQuery(entry) {
@@ -1157,7 +1186,7 @@ module.exports = async (req, res) => {
   // Jede Abfrage protokollieren - auch die erfolglosen. Die zeigen Traffic und belegen, dass die
   // Seite benutzt wird; ausserdem sieht man an den Status-Werten sofort, wo es klemmt.
   const logAttempt = (status, extra) => logQuery({
-    hotelLink: link || '',
+    hotelLink: linkFuersLog(link),
     room: room || '',
     board: LOG_BOARD_LABEL[board] || board || '',
     cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
@@ -1332,7 +1361,7 @@ module.exports = async (req, res) => {
       const best = summary.best;
       const basePrice = baseRow && baseRow.priceEuro != null ? baseRow.priceEuro : null;
       await logQuery({
-        hotelLink: link,
+        hotelLink: linkFuersLog(link),
         room: room || '',
         board: LOG_BOARD_LABEL[board] || board || '',
         cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
