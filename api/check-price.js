@@ -387,30 +387,74 @@ function detectSessionCurrency(bodyText) {
   return null;
 }
 
+// ---- Geraeteprofile -----------------------------------------------------------------------
+// Mehrere Leute im Vielfliegertreff berichten, dass bei Booking das GERAET den groessten
+// Preisunterschied macht - groesser als das Land. Messbar ist das nur, wenn wir mehr faelschen
+// als den User-Agent-String.
+//
+// Der haeufigste Fehler dabei: nur den UA aendern. Aktuelles Chrome schickt zusaetzlich
+// Client Hints (Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform). Bleiben die auf dem echten
+// Wert der Lambda-Umgebung ("Linux", mobile: ?0), waehrend der UA "iPhone" behauptet, ist der
+// Widerspruch fuer jede Bot-Erkennung offensichtlich - und Booking liefert dann womoeglich
+// genau deshalb andere Preise, was wir faelschlich als Geraete-Effekt lesen wuerden.
+// Deshalb wird pro Profil AUCH die Metadata gesetzt, plus passender Viewport und Touch.
+const DEVICE_PROFILES = {
+  // Der bisherige Standard - bleibt Default, damit alte Messungen vergleichbar bleiben.
+  windows: {
+    label: 'Windows/Desktop',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900, deviceScaleFactor: 1, isMobile: false, hasTouch: false },
+    meta: { platform: 'Windows', platformVersion: '15.0.0', architecture: 'x86', bitness: '64', mobile: false, model: '' },
+  },
+  mac: {
+    label: 'macOS/Desktop',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 900, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
+    meta: { platform: 'macOS', platformVersion: '14.4.0', architecture: 'arm', bitness: '64', mobile: false, model: '' },
+  },
+  android: {
+    label: 'Android/Smartphone',
+    ua: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36',
+    viewport: { width: 412, height: 915, deviceScaleFactor: 2.6, isMobile: true, hasTouch: true },
+    meta: { platform: 'Android', platformVersion: '14.0.0', architecture: '', bitness: '', mobile: true, model: 'Pixel 8' },
+  },
+  // iPhone laeuft mit Safari-Kennung. Client Hints schickt Safari nicht, deshalb hier keine
+  // Metadata - das ist bei einem echten iPhone genauso und faellt daher nicht auf.
+  iphone: {
+    label: 'iOS/iPhone',
+    ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+    viewport: { width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
+    meta: null,
+  },
+};
+const DEFAULT_DEVICE = 'windows';
+function deviceProfile(name) {
+  return DEVICE_PROFILES[String(name || '').toLowerCase()] || DEVICE_PROFILES[DEFAULT_DEVICE];
+}
+
 // ---- Ein Land pruefen (Proxy + Headless-Chrome, Bilder/Fonts/Stylesheets geblockt) --------
 
 // blockScripts: zusaetzlich zu Bildern/Fonts/CSS auch Bookings eigene JavaScript-Bundles
 // verwerfen. Die machen den Loewenanteil des Proxy-Traffics aus, und die Zimmertabelle steht
 // im ausgelieferten HTML - ob sie OHNE Skripte noch vollstaendig ist, muss aber gemessen
 // werden, nicht angenommen. Deshalb als Schalter, nicht als fixe Aenderung.
-async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
+async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts, device) {
   let browser;
   // Ausserhalb des try, damit der bis zum Abbruch verbrauchte Traffic auch im Fehlerfall
   // zurueckgegeben werden kann.
   let transferBytes = 0;
+  const prof = deviceProfile(device);
   try {
     const launchArgs = proxyServer ? [...chromium.args, `--proxy-server=${proxyServer}`] : [...chromium.args];
     browser = await puppeteer.launch({
       args: launchArgs,
-      defaultViewport: { width: 1280, height: 900 },
+      defaultViewport: prof.viewport,
       executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
       headless: chromium.headless,
     });
     const page = await browser.newPage();
     if (proxyServer && proxyAuth) await page.authenticate(proxyAuth);
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-    );
+    await page.setViewport(prof.viewport);
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'de-DE,de;q=0.9' });
 
     await page.setRequestInterception(true);
@@ -441,10 +485,42 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
       const cdp = await page.target().createCDPSession();
       await cdp.send('Network.enable');
       cdp.on('Network.loadingFinished', (e) => { transferBytes += (e && e.encodedDataLength) || 0; });
-      cdp.on('Network.dataReceived', (e) => { /* nur Fortschritt, nicht doppelt zaehlen */ });
+
+      // Geraeteprofil setzen: User-Agent UND Client Hints in einem Zug. Ueber CDP, weil nur so
+      // die userAgentMetadata mitgeht - mit page.setUserAgent() allein bliebe
+      // Sec-CH-UA-Platform auf "Linux" und Sec-CH-UA-Mobile auf "?0" stehen. Ein UA, der
+      // "iPhone" behauptet, waehrend die Client Hints "Linux, nicht mobil" sagen, ist fuer
+      // Booking sofort als Faelschung erkennbar - und dann messen wir nicht den Geraete-Effekt,
+      // sondern die Reaktion auf einen auffaelligen Bot.
+      await cdp.send('Emulation.setUserAgentOverride', {
+        userAgent: prof.ua,
+        acceptLanguage: 'de-DE,de;q=0.9',
+        platform: prof.meta ? prof.meta.platform : 'iPhone',
+        ...(prof.meta ? {
+          userAgentMetadata: {
+            brands: [
+              { brand: 'Chromium', version: '123' },
+              { brand: 'Google Chrome', version: '123' },
+              { brand: 'Not:A-Brand', version: '99' },
+            ],
+            fullVersion: '123.0.0.0',
+            platform: prof.meta.platform,
+            platformVersion: prof.meta.platformVersion,
+            architecture: prof.meta.architecture,
+            bitness: prof.meta.bitness,
+            model: prof.meta.model,
+            mobile: prof.meta.mobile,
+          },
+        } : {}),
+      });
+      if (prof.viewport.hasTouch) {
+        await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      }
     } catch (e) {
-      // Ohne CDP laeuft alles weiter, nur ohne Traffic-Messung.
-      console.log('[attemptFetch] Traffic-Messung nicht verfuegbar:', (e && e.message) || e);
+      // Faellt CDP aus, laeuft alles weiter - aber dann OHNE korrekte Geraetekennung. Das muss
+      // im Log stehen, sonst messen wir Desktop und schreiben "Mobil" in die Tabelle.
+      console.log('[attemptFetch] CDP-Override fehlgeschlagen, Geraeteprofil evtl. unwirksam:', (e && e.message) || e);
+      try { await page.setUserAgent(prof.ua); } catch (e2) { /* ignorieren */ }
     }
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 13000 });
@@ -575,7 +651,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
   }
 }
 
-async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, cancel, rates, maxAttempts) {
+async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, cancel, rates, maxAttempts, device) {
   const attempts = maxAttempts || MAX_ATTEMPTS;
   const t0 = Date.now();
   const proxyAuth = { username: `${userPrefix}${countryCode}`, password };
@@ -590,7 +666,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   result.transferBytes = 0;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const r = await attemptFetch(targetUrl, proxyServer, proxyAuth, BLOCK_BOOKING_SCRIPTS);
+    const r = await attemptFetch(targetUrl, proxyServer, proxyAuth, BLOCK_BOOKING_SCRIPTS, device);
     result.transferBytes += r.transferBytes || 0;
     bodyText = r.bodyText;
     loadedOk = r.loadedOk;
@@ -662,8 +738,12 @@ async function verifyTurnstile(token, remoteIp) {
 
 // ---- Ergebnis-Cache (Upstash Redis REST, optional) ----------------------------------------
 
-function cacheKeyFor(link, room, board, cancel) {
-  return 'georates:' + crypto.createHash('sha256').update(`${link}|${room}|${board}|${cancel}`).digest('hex').slice(0, 32);
+// Das Geraet MUSS in den Cache-Schluessel. Sonst liefert eine Mobil-Abfrage das gecachte
+// Desktop-Ergebnis zurueck - und genau der Unterschied, den wir messen wollen, waere
+// wegdefiniert, ohne dass es jemand merkt.
+function cacheKeyFor(link, room, board, cancel, device) {
+  return 'georates:' + crypto.createHash('sha256')
+    .update(`${link}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
 }
 
 async function cacheGet(key) {
@@ -979,8 +1059,12 @@ module.exports = async (req, res) => {
       // Messmodus: Mit noScripts:true laesst sich derselbe Abruf einmal mit und einmal ohne
       // Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu vergleichen.
       const blockScripts = !!(req.body && req.body.noScripts);
+      // Geraeteprofil: windows (Default), mac, android, iphone. Hier durchgereicht, damit sich
+      // die Zimmerliste eines Geraets einzeln pruefen laesst - das ist der billigste Weg zu
+      // sehen, ob der Parser die mobile Seitenstruktur ueberhaupt versteht.
+      const device = (req.body && req.body.device) || DEFAULT_DEVICE;
       for (let a = 1; a <= 2 && !withOpts; a++) {
-        const r = await attemptFetch(link, srv, proxyAuth, blockScripts);
+        const r = await attemptFetch(link, srv, proxyAuth, blockScripts, device);
         lastR = r;
         if (r.loadedOk) {
           const rl = roomsFrom(r);
@@ -989,7 +1073,7 @@ module.exports = async (req, res) => {
       }
       // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
       if (!withOpts && !namesOnly) {
-        const r = await attemptFetch(link, null, null, blockScripts);
+        const r = await attemptFetch(link, null, null, blockScripts, device);
         lastR = r;
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
@@ -1080,7 +1164,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '');
+  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', (req.body && req.body.device) || DEFAULT_DEVICE);
   const cached = await cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
@@ -1120,6 +1204,11 @@ module.exports = async (req, res) => {
     // Ausgangsland (Referenzpreis) aus dem Booking-Link ableiten - nicht zwingend Deutschland.
     const baselineCountry = detectBaselineCountry(link);
 
+    // Geraeteprofil gilt fuer ALLE Laender derselben Abfrage. Sonst waere der Vergleich wertlos:
+    // Wir wollen den Laendereffekt messen, nicht Land gegen Geraet.
+    const device = (req.body && req.body.device) || DEFAULT_DEVICE;
+    const deviceLabel = deviceProfile(device).label;
+
     // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien) PARALLEL, je 2 Versuche (Genauigkeit).
     const probeCountries = [baselineCountry];
     if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
@@ -1136,7 +1225,7 @@ module.exports = async (req, res) => {
     // als wuerde das Tool raten.
     let basePriceForGuard = null;
     const fetchAndStream = (c, attempts) =>
-      fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, attempts)
+      fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
         .then((r) => {
           if (c !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
             r.priceEuro = null;
@@ -1241,7 +1330,10 @@ module.exports = async (req, res) => {
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
         // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
         // wirklich kostet, ohne es jedes Mal aus dem Smartproxy-Dashboard zurueckzurechnen.
+        // Das Geraet gehoert mit in die Zeile: Ohne diese Angabe liessen sich Desktop- und
+        // Mobil-Messungen in der Tabelle spaeter nicht mehr auseinanderhalten.
         status: (partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok')
+          + ` · ${deviceLabel}`
           + ` · ${Math.round(results.reduce((s, r) => s + (r.transferBytes || 0), 0) / (1024 * 1024))} MB`,
       });
     } else {
