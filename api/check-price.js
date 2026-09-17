@@ -63,8 +63,13 @@ const MIN_LOADED_LINES = 300;
 // gedauert hat, und starten die naechste nur, wenn sie nach dieser Erfahrung noch vor
 // HARD_DEADLINE_MS fertig wird. Das nutzt das Zeitfenster deutlich besser aus UND kann das
 // Limit nicht mehr ueberfahren.
-const FUNCTION_LIMIT_MS = 60000;          // Vercel-Limit (siehe vercel.json)
-const RESPONSE_RESERVE_MS = 6000;         // Puffer fuer Zusammenfassung, Cache-Write, Logging, Antwort
+// Seit Vercel "Fluid Compute" (im Projekt aktiv) erlaubt auch der kostenlose Hobby-Plan bis zu
+// 300s pro Funktion - die alte 60s-Grenze gilt nicht mehr. Wir nehmen NICHT das Maximum: 15
+// Laender brauchen erfahrungsgemaess ~100-120s, und jede Sekunde Laufzeit ist bezahlter
+// Proxy-Traffic. 180s lassen genug Luft, begrenzen aber einen entgleisten Lauf.
+// WICHTIG: Dieser Wert muss zu maxDuration in vercel.json passen.
+const FUNCTION_LIMIT_MS = 180000;         // Vercel-Limit (siehe vercel.json)
+const RESPONSE_RESERVE_MS = 10000;        // Puffer fuer Zusammenfassung, Cache-Write, Logging, Antwort
 const HARD_DEADLINE_MS = FUNCTION_LIMIT_MS - RESPONSE_RESERVE_MS;
 // Schaetzung fuer die erste Gruppe (noch kein Messwert vorhanden) - bewusst pessimistisch.
 const FIRST_BATCH_ESTIMATE_MS = 14000;
