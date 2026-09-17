@@ -18,7 +18,7 @@ in `api/check-price.js`.
    geprueft (Bilder/Fonts/Stylesheets werden dabei geblockt, um Traffic zu sparen). Die
    Zeitsteuerung ist vorausschauend: Nach jeder Gruppe wird gemessen, wie lange sie gedauert
    hat, und die naechste Gruppe nur gestartet, wenn sie nach dieser Erfahrung noch vor der
-   Deadline (54s, also Vercel-Limit minus Puffer fuer Antwort und Logging) fertig wird.
+   Deadline (170s, also maxDuration 180s minus Puffer fuer Antwort und Logging) fertig wird.
    Reicht die Zeit nicht, kommt die Antwort mit den bis dahin geprueften Laendern plus
    `partial: true` zurueck; im Log steht dann, wie viele Laender geprueft wurden.
 5. Ergebnis wird gecacht (24h) und zurueckgegeben.
@@ -64,10 +64,14 @@ Zugangsdaten stehen bewusst NICHT im Code (dieses Repo ist oeffentlich):
 
 ## Bekannte Grenzen
 
-- Die Erweiterung auf weitere Laender laeuft gegen eine harte Deadline (54s) - bei sehr
+- Die Erweiterung auf weitere Laender laeuft gegen eine harte Deadline (170s) - bei sehr
   langsamen Proxy-Antworten werden ggf. nicht alle 13 zusaetzlichen Laender erreicht, dann
   kommt `partial: true` in der Antwort zurueck statt eines vollstaendigen Scans. Ein
   "kein guenstigeres Land" aus einem gekuerzten Lauf ist entsprechend weniger belastbar.
+- Ein vollstaendiger Scan dauert rund zwei Minuten. Das ist eine bewusste Entscheidung
+  gegen Tempo und fuer Vollstaendigkeit: Ein abgebrochener Scan liefert ein "nichts gefunden",
+  das schlicht nicht stimmt. Der Frontend-Timeout (190s in `index.html`) muss deshalb immer
+  ueber `maxDuration` liegen.
 - Booking.com kann Proxy-Traffic trotzdem blocken/CAPTCHA zeigen - dann liefert die Funktion
   fuer das betroffene Land keinen Preis, andere Laender koennen trotzdem erfolgreich sein.
 - Ohne Upstash-Variablen läuft alles, aber ohne Cache (jede Anfrage verbraucht volle

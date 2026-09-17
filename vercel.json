@@ -1,8 +1,8 @@
 {
   "functions": {
     "api/check-price.js": {
-      "maxDuration": 60,
-      "memory": 1536
+      "maxDuration": 180,
+      "memory": 2048
     }
   }
 }
