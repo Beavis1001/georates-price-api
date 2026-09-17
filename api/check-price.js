@@ -135,6 +135,11 @@ const BLOCKED_RESOURCE_TYPES = new Set([
   'image', 'media', 'font', 'stylesheet', 'other',
   'texttrack', 'websocket', 'manifest', 'eventsource', 'ping', 'cspviolationreport',
 ]);
+// Schalter fuer den Preis-Pfad: Bookings eigene JavaScript-Bundles mitblocken. Das ist der
+// groesste Hebel beim Proxy-Verbrauch (Skripte sind der Grossteil der Bytes), darf aber erst
+// scharf geschaltet werden, wenn gemessen ist, dass die Zimmertabelle ohne sie vollstaendig
+// bleibt. Bis dahin false - im "rooms"-Modus laesst sich per noScripts:true einzeln testen.
+const BLOCK_BOOKING_SCRIPTS = false;
 // Nur Bookings eigene Domains duerfen laden (bstatic.com ist Bookings Asset-CDN).
 const ALLOWED_HOST_RE = /(^|\.)booking\.com$|(^|\.)bstatic\.com$/i;
 // Bekannte Tracker/Werbenetze - sicherheitshalber explizit, falls sie unter booking.com laufen.
@@ -356,7 +361,11 @@ function detectSessionCurrency(bodyText) {
 
 // ---- Ein Land pruefen (Proxy + Headless-Chrome, Bilder/Fonts/Stylesheets geblockt) --------
 
-async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
+// blockScripts: zusaetzlich zu Bildern/Fonts/CSS auch Bookings eigene JavaScript-Bundles
+// verwerfen. Die machen den Loewenanteil des Proxy-Traffics aus, und die Zimmertabelle steht
+// im ausgelieferten HTML - ob sie OHNE Skripte noch vollstaendig ist, muss aber gemessen
+// werden, nicht angenommen. Deshalb als Schalter, nicht als fixe Aenderung.
+async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
   let browser;
   try {
     const launchArgs = proxyServer ? [...chromium.args, `--proxy-server=${proxyServer}`] : [...chromium.args];
@@ -376,7 +385,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       try {
-        if (BLOCKED_RESOURCE_TYPES.has(req.resourceType())) return req.abort();
+        const typ = req.resourceType();
+        if (BLOCKED_RESOURCE_TYPES.has(typ)) return req.abort();
+        if (blockScripts && typ === 'script') return req.abort();
         const host = new URL(req.url()).hostname;
         if (TRACKER_HOST_RE.test(host)) return req.abort();
         if (!ALLOWED_HOST_RE.test(host)) return req.abort(); // alle Drittanbieter-Domains
@@ -531,7 +542,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   let lastErr = null;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const r = await attemptFetch(targetUrl, proxyServer, proxyAuth);
+    const r = await attemptFetch(targetUrl, proxyServer, proxyAuth, BLOCK_BOOKING_SCRIPTS);
     bodyText = r.bodyText;
     loadedOk = r.loadedOk;
     lastErr = r.err;
@@ -916,8 +927,11 @@ module.exports = async (req, res) => {
       //    Booking die Tarifzeilen mit Verpflegung/Storno. Ein Datacenter-Direktabruf bekommt zwar
       //    die Zimmernamen, aber keine Optionen - daher hier Proxy zuerst.
       const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
+      // Messmodus: Mit noScripts:true laesst sich derselbe Abruf einmal mit und einmal ohne
+      // Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu vergleichen.
+      const blockScripts = !!(req.body && req.body.noScripts);
       for (let a = 1; a <= 2 && !withOpts; a++) {
-        const r = await attemptFetch(link, srv, proxyAuth);
+        const r = await attemptFetch(link, srv, proxyAuth, blockScripts);
         lastR = r;
         if (r.loadedOk) {
           const rl = roomsFrom(r);
@@ -926,7 +940,7 @@ module.exports = async (req, res) => {
       }
       // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
       if (!withOpts && !namesOnly) {
-        const r = await attemptFetch(link, null, null);
+        const r = await attemptFetch(link, null, null, blockScripts);
         lastR = r;
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
