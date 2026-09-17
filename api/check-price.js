@@ -397,12 +397,25 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
       }
     });
 
-    // Groben Traffic mitzaehlen, um den Proxy-Verbrauch messbar zu machen.
+    // Tatsaechlich uebertragene Bytes zaehlen - das ist exakt das, was Smartproxy abrechnet.
+    //
+    // Frueher wurde hier der content-length-Header aufsummiert. Das war praktisch wertlos:
+    // Booking liefert fast alles chunked aus, also ganz ohne content-length, und komprimiert
+    // zusaetzlich. Gemessen wurden dadurch 7 KB fuer eine Seite mit zwei Dutzend Zimmern -
+    // eine Zahl, mit der man keine Entscheidung ueber Proxy-Kosten treffen kann.
+    //
+    // Network.loadingFinished liefert encodedDataLength: die real ueber die Leitung gegangene,
+    // komprimierte Byte-Zahl inklusive Header. Genau die richtige Groesse.
     let transferBytes = 0;
-    page.on('response', (res) => {
-      const len = parseInt((res.headers() || {})['content-length'] || '0', 10);
-      if (!Number.isNaN(len)) transferBytes += len;
-    });
+    try {
+      const cdp = await page.target().createCDPSession();
+      await cdp.send('Network.enable');
+      cdp.on('Network.loadingFinished', (e) => { transferBytes += (e && e.encodedDataLength) || 0; });
+      cdp.on('Network.dataReceived', (e) => { /* nur Fortschritt, nicht doppelt zaehlen */ });
+    } catch (e) {
+      // Ohne CDP laeuft alles weiter, nur ohne Traffic-Messung.
+      console.log('[attemptFetch] Traffic-Messung nicht verfuegbar:', (e && e.message) || e);
+    }
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 13000 });
 
