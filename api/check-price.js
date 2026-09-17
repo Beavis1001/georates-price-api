@@ -324,8 +324,14 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
 // Waehrungssymbol/-kuerzel aus der Preiszeile in einen ISO-Code uebersetzen. Booking zeigt je
 // nach Hotel/Sitzung z.B. "US$2.238" auch in einer deutschen Sitzung - deshalb richtet sich die
 // Umrechnung nach der TATSAECHLICH angezeigten Waehrung, nicht nach dem Land des Proxys.
+// WICHTIG: Ein nacktes "$" steht hier BEWUSST NICHT fuer USD. Argentinien, Mexiko, Kolumbien,
+// Chile und Uruguay schreiben ihre eigene Waehrung ebenfalls "$". Die Gleichsetzung "$ = USD"
+// hat am 17.09. dazu gefuehrt, dass 2.762.635 argentinische Pesos als 2.762.635 US-Dollar
+// gelesen und zu 2.401.524,90 EUR umgerechnet wurden - ein Hotelzimmer fuer 2,4 Millionen Euro.
+// Ohne Eintrag faellt normalizeCurrency auf die Landeswaehrung der Sitzung zurueck, und das ist
+// bei einem nackten "$" immer die bessere Annahme. "US$" bleibt eindeutig und steht weiter drin.
 const CURRENCY_SYMBOLS = {
-  '€': 'EUR', '$': 'USD', 'US$': 'USD', 'USD$': 'USD', '£': 'GBP', '¥': 'JPY', 'CN¥': 'CNY',
+  '€': 'EUR', 'US$': 'USD', 'USD$': 'USD', '£': 'GBP', '¥': 'JPY', 'CN¥': 'CNY',
   'R$': 'BRL', 'CA$': 'CAD', 'A$': 'AUD', 'NZ$': 'NZD', 'MX$': 'MXN', 'AR$': 'ARS', 'CO$': 'COP',
   '₺': 'TRY', '₹': 'INR', '₫': 'VND', '₱': 'PHP', '฿': 'THB', '₪': 'ILS', '₩': 'KRW', 'RP': 'IDR',
   'E£': 'EGP', 'EG£': 'EGP', '₨': 'PKR', 'S/': 'PEN', 'S/.': 'PEN', 'CHF': 'CHF',
@@ -650,7 +656,35 @@ async function logQuery(entry) {
 
 // ---- Gesamtergebnis aus Einzelländern ableiten --------------------------------------------
 
+// Sicherheitsnetz gegen Waehrungs-Verwechslungen. Derselbe Aufenthalt kann von Land zu Land
+// ein paar Prozent kosten, aber niemals das Zehnfache. Weicht ein Landespreis so extrem vom
+// Ausgangspreis ab, ist nicht der Preis exotisch, sondern die Umrechnung kaputt (falsch
+// erkannte Waehrung, verrutschtes Tausendertrennzeichen). So etwas darf nicht in der Tabelle
+// landen - es macht das ganze Ergebnis unglaubwuerdig. Dann lieber "kein Preis ermittelt".
+const PLAUSIBLE_MAX_FACTOR = 10;
+const PLAUSIBLE_MIN_FACTOR = 0.1;
+function implausibleVsBaseline(priceEuro, basePriceEuro) {
+  if (priceEuro == null || basePriceEuro == null || basePriceEuro <= 0) return false;
+  const ratio = priceEuro / basePriceEuro;
+  return ratio > PLAUSIBLE_MAX_FACTOR || ratio < PLAUSIBLE_MIN_FACTOR;
+}
+
 function summarize(results, baselineCountry) {
+  // Erst aussortieren, dann auswerten: Ein unplausibler Wert wuerde sonst als "teuerstes Land"
+  // in der Tabelle stehen bleiben und Nutzer an den uebrigen Zahlen zweifeln lassen.
+  const baseRow = results.find((r) => r.country === baselineCountry);
+  const basePrice = baseRow && baseRow.priceEuro != null ? baseRow.priceEuro : null;
+  for (const r of results) {
+    if (r.country !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePrice)) {
+      console.log(`[summarize] ${r.country}: ${r.priceEuro} EUR gegen Basis ${basePrice} EUR ` +
+        `- unplausibel (${r.priceRaw} ${r.currency}), wird verworfen`);
+      r.priceEuro = null;
+      r.priceLocal = null;
+      r.priceRaw = 'Preis nicht verlässlich erkannt';
+      r.implausible = true;
+    }
+  }
+
   const withPrice = results.filter((r) => r.priceEuro !== null);
   if (!withPrice.length) return { success: false, reason: 'price_not_found', results, baselineCountry };
 
@@ -1033,11 +1067,28 @@ module.exports = async (req, res) => {
     }
     // Im Stream-Modus geht jedes Land raus, SOBALD es fertig ist - nicht erst, wenn die ganze
     // Gruppe durch ist. Deshalb haengt der Versand am einzelnen Promise, nicht am Promise.all.
+    // Sobald der Ausgangspreis feststeht, wird jeder weitere Landespreis schon VOR dem Senden
+    // gegen ihn plausibilisiert. Sonst blitzt ein kaputter Wert (2,4 Mio. EUR) kurz in der
+    // Live-Tabelle auf und verschwindet erst mit der Endauswertung wieder - das sieht aus,
+    // als wuerde das Tool raten.
+    let basePriceForGuard = null;
     const fetchAndStream = (c, attempts) =>
       fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, attempts)
-        .then((r) => { streamSend({ type: 'country', result: r }); return r; });
+        .then((r) => {
+          if (c !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
+            r.priceEuro = null;
+            r.priceLocal = null;
+            r.priceRaw = 'Preis nicht verlässlich erkannt';
+            r.implausible = true;
+          }
+          streamSend({ type: 'country', result: r });
+          return r;
+        });
 
     let results = await Promise.all(probeCountries.map((c) => fetchAndStream(c, MAX_ATTEMPTS)));
+    // Ab hier kennen wir den Referenzpreis - alle folgenden Laender laufen durch die Pruefung.
+    const probeBase = results.find((r) => r.country === baselineCountry);
+    basePriceForGuard = probeBase && probeBase.priceEuro != null ? probeBase.priceEuro : null;
 
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
