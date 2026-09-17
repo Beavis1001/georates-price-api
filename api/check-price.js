@@ -1179,7 +1179,13 @@ module.exports = async (req, res) => {
         status: partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok',
       });
     } else {
-      await logAttempt('kein Preis gefunden', { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
+      // Im Log festhalten, ob der Link Reisedaten enthielt. Ohne checkin/checkout sucht Booking
+      // sich selbst einen Termin und zeigt haeufig gar keine Zimmertabelle - das war am 17.09.
+      // die Ursache saemtlicher Fehlschlaege. So laesst sich spaeter auszaehlen, wie oft es
+      // wirklich daran liegt, statt es zu vermuten.
+      const hatDatum = /[?&](checkin|checkout)=/i.test(link) || /[?&]checkin_year=/i.test(link);
+      await logAttempt(hatDatum ? 'kein Preis gefunden' : 'kein Preis gefunden (Link ohne Reisedaten)',
+        { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
     respond(200, payload);
   } catch (err) {
