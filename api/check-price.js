@@ -49,7 +49,13 @@ const RELEVANT_SAVINGS_PCT = 1.0;
 // Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
 const MAX_ATTEMPTS = 2;
 const EXPANSION_ATTEMPTS = 1;
-const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessigeres Laden            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
+const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessigeres Laden
+// In der Erweiterungsphase duerfen es mehr sein: dort zaehlt nur 1 Versuch pro Land, ein
+// verpasstes Land ist unkritisch, und seit der Umstellung auf 2 GB (vercel.json) ist genug
+// Arbeitsspeicher fuer mehr gleichzeitige Chromium-Instanzen da. Das halbiert die Laufzeit
+// eines vollstaendigen Scans. Hoeher als 4 bringt wenig: der Hobby-Plan hat nur 1 vCPU,
+// ab da warten die Instanzen nur noch aufeinander.
+const EXPANSION_BATCH_SIZE = 4;
 const MIN_LOADED_LINES = 300;
 // Zeitsteuerung der Erweiterungsphase.
 //
@@ -773,6 +779,47 @@ module.exports = async (req, res) => {
 
   const { link, room, board, cancel, mode, turnstileToken } = req.body || {};
 
+  // ---- Streaming ---------------------------------------------------------------------------
+  // Ein vollstaendiger Laendervergleich dauert etwa eine Minute. Frueher schwieg der Server
+  // diese ganze Zeit und schickte am Ende alles auf einmal - der Nutzer sass vor einem
+  // Spinner und wusste nicht, ob ueberhaupt etwas passiert. Viele brechen dann ab.
+  //
+  // Mit stream:true schicken wir stattdessen NDJSON: pro fertigem Land sofort eine Zeile,
+  // ganz am Ende eine "summary"-Zeile mit dem Gesamtergebnis. Das Frontend fuellt die Tabelle
+  // damit live. Die Gesamtdauer aendert sich dadurch nicht - die gefuehlte Wartezeit schon,
+  // weil nach ~20s die ersten echten Zahlen dastehen.
+  //
+  // Wichtig: Turnstile-Pruefung, Vergleichslogik und Logging bleiben hier im Server. Die
+  // Alternative (mehrere parallele Requests aus dem Browser) haette genau das in den Client
+  // verlagert, wo es manipulierbar waere.
+  const wantsStream = !!(req.body && req.body.stream) && mode !== 'rooms';
+  let streamOpen = false;
+  const streamSend = (obj) => {
+    if (!streamOpen) return;
+    try { res.write(JSON.stringify(obj) + '\n'); } catch (e) { /* Verbindung weg - egal */ }
+  };
+  const openStream = () => {
+    if (streamOpen) return;
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    // Ohne diese Header puffern manche Zwischenschichten die Antwort, bis sie komplett ist -
+    // dann waere das Streaming wirkungslos.
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    streamOpen = true;
+  };
+  // Antwortet je nach Modus als Stream-Abschluss oder als klassisches JSON, damit der restliche
+  // Code sich nicht um den Unterschied kuemmern muss.
+  const respond = (statusCode, payload) => {
+    if (wantsStream) {
+      openStream();
+      streamSend({ type: 'summary', ...payload });
+      res.end();
+    } else {
+      res.status(statusCode).json(payload);
+    }
+  };
+
   // Modus "rooms": nur die Zimmerliste des Hotels laden (fuer das Auswahl-Dropdown im Formular).
   // Ein einziger Seitenabruf ueber das Ausgangsland, kein Laendervergleich. Kein Turnstile noetig
   // (leichter, seltener Abruf), aber weiterhin Proxy-/Link-Pruefung.
@@ -868,7 +915,7 @@ module.exports = async (req, res) => {
   const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
   const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
   if (!humanOk) {
-    res.status(403).json({ success: false, reason: 'bot_check_failed' });
+    respond(403, { success: false, reason: 'bot_check_failed' });
     return;
   }
 
@@ -899,12 +946,12 @@ module.exports = async (req, res) => {
 
   if (!link || !/^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i.test(link)) {
     await logAttempt('kein gültiger Booking-Link');
-    res.status(400).json({ success: false, reason: 'invalid_link' });
+    respond(400, { success: false, reason: 'invalid_link' });
     return;
   }
   if (!room) {
     await logAttempt('kein Zimmer angegeben');
-    res.status(400).json({ success: false, reason: 'missing_room' });
+    respond(400, { success: false, reason: 'missing_room' });
     return;
   }
 
@@ -912,7 +959,14 @@ module.exports = async (req, res) => {
   const cached = await cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
-    res.status(200).json({ ...cached, fromCache: true });
+    // Aus dem Cache liegt alles sofort vor. Im Stream-Modus schicken wir die Laenderzeilen
+    // trotzdem einzeln, damit das Frontend nur EINEN Darstellungsweg braucht.
+    if (wantsStream) {
+      openStream();
+      streamSend({ type: 'meta', baselineCountry: cached.baselineCountry, fromCache: true, totalCountries: (cached.results || []).length });
+      (cached.results || []).forEach((r) => streamSend({ type: 'country', result: r }));
+    }
+    respond(200, { ...cached, fromCache: true });
     return;
   }
 
@@ -920,7 +974,7 @@ module.exports = async (req, res) => {
   const password = process.env.SMARTPROXY_PASSWORD;
   const proxyServer = process.env.SMARTPROXY_SERVER || 'http://proxy.smartproxy.net:3120';
   if (!userPrefix || !password) {
-    res.status(200).json({ success: false, reason: 'proxy_not_configured' });
+    respond(200, { success: false, reason: 'proxy_not_configured' });
     return;
   }
 
@@ -930,7 +984,7 @@ module.exports = async (req, res) => {
     const rates = await getLiveRates();
     if (!rates) {
       await logAttempt('Wechselkurse nicht erreichbar');
-      res.status(200).json({ success: false, reason: 'fx_unavailable' });
+      respond(200, { success: false, reason: 'fx_unavailable' });
       return;
     }
 
@@ -945,9 +999,17 @@ module.exports = async (req, res) => {
     const probeCountries = [baselineCountry];
     if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
 
-    let results = await Promise.all(
-      probeCountries.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, MAX_ATTEMPTS))
-    );
+    if (wantsStream) {
+      openStream();
+      streamSend({ type: 'meta', baselineCountry, totalCountries: ALL_COUNTRIES.length });
+    }
+    // Im Stream-Modus geht jedes Land raus, SOBALD es fertig ist - nicht erst, wenn die ganze
+    // Gruppe durch ist. Deshalb haengt der Versand am einzelnen Promise, nicht am Promise.all.
+    const fetchAndStream = (c, attempts) =>
+      fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, attempts)
+        .then((r) => { streamSend({ type: 'country', result: r }); return r; });
+
+    let results = await Promise.all(probeCountries.map((c) => fetchAndStream(c, MAX_ATTEMPTS)));
 
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
@@ -975,7 +1037,7 @@ module.exports = async (req, res) => {
       // ab, obwohl noch Zeit fuer eine weitere Gruppe waere.
       const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
       let batchEstimateMs = FIRST_BATCH_ESTIMATE_MS;
-      for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
+      for (let i = 0; i < remaining.length; i += EXPANSION_BATCH_SIZE) {
         const elapsed = Date.now() - startTime;
         if (elapsed + batchEstimateMs > HARD_DEADLINE_MS) {
           partial = true;
@@ -985,11 +1047,9 @@ module.exports = async (req, res) => {
             `${remaining.length - i} Land/Laender ungeprueft.`);
           break;
         }
-        const batch = remaining.slice(i, i + BATCH_SIZE);
+        const batch = remaining.slice(i, i + EXPANSION_BATCH_SIZE);
         const batchStart = Date.now();
-        const batchResults = await Promise.all(
-          batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, EXPANSION_ATTEMPTS))
-        );
+        const batchResults = await Promise.all(batch.map((c) => fetchAndStream(c, EXPANSION_ATTEMPTS)));
         results.push(...batchResults);
         // Schaetzung fortschreiben: gemessene Dauer plus Sicherheitsaufschlag. Wir nehmen den
         // groesseren Wert aus alter und neuer Schaetzung nicht - sonst zieht ein einzelner
@@ -1030,9 +1090,9 @@ module.exports = async (req, res) => {
     } else {
       await logAttempt('kein Preis gefunden', { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
-    res.status(200).json(payload);
+    respond(200, payload);
   } catch (err) {
     try { await logAttempt('Fehler: ' + String((err && err.message) || err).slice(0, 120)); } catch (e) { /* Logging ist optional */ }
-    res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
+    respond(200, { success: false, reason: 'error', message: String((err && err.message) || err) });
   }
 };
