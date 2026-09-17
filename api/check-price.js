@@ -367,6 +367,9 @@ function detectSessionCurrency(bodyText) {
 // werden, nicht angenommen. Deshalb als Schalter, nicht als fixe Aenderung.
 async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
   let browser;
+  // Ausserhalb des try, damit der bis zum Abbruch verbrauchte Traffic auch im Fehlerfall
+  // zurueckgegeben werden kann.
+  let transferBytes = 0;
   try {
     const launchArgs = proxyServer ? [...chromium.args, `--proxy-server=${proxyServer}`] : [...chromium.args];
     browser = await puppeteer.launch({
@@ -406,7 +409,6 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
     //
     // Network.loadingFinished liefert encodedDataLength: die real ueber die Leitung gegangene,
     // komprimierte Byte-Zahl inklusive Header. Genau die richtige Groesse.
-    let transferBytes = 0;
     try {
       const cdp = await page.target().createCDPSession();
       await cdp.send('Network.enable');
@@ -539,7 +541,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts) {
   } catch (err) {
     console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
     if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
-    return { bodyText: null, rooms: [], loadedOk: false, err };
+    // Auch ein gescheiterter Versuch hat schon Traffic verbraucht - der muss mitgezaehlt
+    // werden, sonst sieht die Kostenbilanz besser aus als sie ist.
+    return { bodyText: null, rooms: [], loadedOk: false, transferBytes, err };
   }
 }
 
@@ -554,8 +558,12 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   let loadedOk = false;
   let lastErr = null;
 
+  // Traffic ueber ALLE Versuche dieses Landes summieren - Fehlversuche kosten genauso.
+  result.transferBytes = 0;
+
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const r = await attemptFetch(targetUrl, proxyServer, proxyAuth, BLOCK_BOOKING_SCRIPTS);
+    result.transferBytes += r.transferBytes || 0;
     bodyText = r.bodyText;
     loadedOk = r.loadedOk;
     lastErr = r.err;
@@ -1203,7 +1211,10 @@ module.exports = async (req, res) => {
         herkunftsland,
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
-        status: partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok',
+        // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
+        // wirklich kostet, ohne es jedes Mal aus dem Smartproxy-Dashboard zurueckzurechnen.
+        status: (partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok')
+          + ` · ${Math.round(results.reduce((s, r) => s + (r.transferBytes || 0), 0) / (1024 * 1024))} MB`,
       });
     } else {
       // Im Log festhalten, ob der Link Reisedaten enthielt. Ohne checkin/checkout sucht Booking
