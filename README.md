@@ -1,78 +1,62 @@
 # georates-price-api
 
-Serverless-Endpunkt fuer den GeoRates Geo-Preisvergleich: prueft den Preis eines konkreten
-Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet zurueck,
-ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt.
+Serverless-Endpunkt hinter [georates.tech](https://georates.tech). Er prueft den Preis eines
+konkreten Booking.com-Zimmers aus Sitzungen in mehreren Laendern und meldet zurueck, ob ein
+Land denselben Aufenthalt guenstiger anzeigt.
 
-Implementiert in JavaScript (Node, `puppeteer-core` + headless Chromium). Die Parsing-Logik
-stammt urspruenglich aus einem lokalen Python-Prototyp (`hotel_compare.py`), der nie
-veroeffentlicht wurde und hier nicht enthalten ist - der gesamte produktive Code liegt
-in `api/check-price.js`.
+Node mit `puppeteer-core` und headless Chromium, ein einziger Handler in `api/check-price.js`.
 
-## Ablauf pro Anfrage
+## Was der Endpunkt macht
 
-1. Cloudflare-Turnstile-Token pruefen (Bot-Schutz).
-2. Cache pruefen (Upstash Redis, 24h) - bei Treffer sofort Antwort ohne Proxy-Traffic.
-3. Schnelle Probe: Deutschland + Kolumbien parallel.
-4. Zeigt die Probe keine klare Ersparnis (>= 10%), werden weitere Laender in kleinen Gruppen
-   geprueft (Bilder/Fonts/Stylesheets werden dabei geblockt, um Traffic zu sparen). Die
-   Zeitsteuerung ist vorausschauend: Nach jeder Gruppe wird gemessen, wie lange sie gedauert
-   hat, und die naechste Gruppe nur gestartet, wenn sie nach dieser Erfahrung noch vor der
-   Deadline (170s, also maxDuration 180s minus Puffer fuer Antwort und Logging) fertig wird.
-   Reicht die Zeit nicht, kommt die Antwort mit den bis dahin geprueften Laendern plus
-   `partial: true` zurueck; im Log steht dann, wie viele Laender geprueft wurden.
-5. Ergebnis wird gecacht (24h) und zurueckgegeben.
+Eine Anfrage liefert Hotel-Link, Zimmerkategorie, Verpflegung und Stornowunsch. Daraufhin:
 
-Wechselkurse werden bei jeder (nicht gecachten) Anfrage live abgerufen (open.er-api.com,
-kostenlos, kein Key noetig) - faellt die Abfrage aus, springt ein statischer Notfall-Kurs ein.
+1. Bot-Schutz pruefen (Cloudflare Turnstile).
+2. Cache pruefen (Upstash Redis, 24 h). Treffer heisst: sofort antworten, kein Proxy-Traffic.
+3. Ausgangsland und Kolumbien parallel abfragen, je zwei Versuche.
+4. Die uebrigen Laender in Vierergruppen nachziehen. Es werden immer alle Laender geprueft –
+   einen Abbruch bei fruehem Treffer gibt es bewusst nicht mehr, der hat die Statistik verzerrt.
+5. Jedes fertige Land sofort als NDJSON-Zeile rausschreiben, damit die Tabelle im Browser
+   waehrend des Laufs waechst statt am Ende auf einen Schlag zu erscheinen.
 
-## Benoetigte Umgebungsvariablen (Vercel -> Project -> Settings -> Environment Variables)
+Geprueft werden 15 Laender: DE, CO, AR, EG, IN, VN, ID, PK, LK, PE, MX, PH, TH, US, JP.
+Wechselkurse kommen live von open.er-api.com, bei Ausfall greift ein statischer Notfallkurs.
 
-Zugangsdaten stehen bewusst NICHT im Code (dieses Repo ist oeffentlich):
+## Zeitsteuerung
 
-- `SMARTPROXY_USER_PREFIX` - z. B. `smart-ut1nl7crifne_area-` (Laender-Code wird automatisch angehaengt)
-- `SMARTPROXY_PASSWORD` - das Proxy-Passwort
-- `SMARTPROXY_SERVER` - optional, Default `http://proxy.smartproxy.net:3120`
-- `TURNSTILE_SECRET_KEY` - Cloudflare-Turnstile Secret Key (Bot-Schutz). Ohne diese Variable
-  wird der Bot-Check uebersprungen - vor Live-Betrieb setzen, sonst kann jeder beliebig oft
-  die kostenpflichtigen Proxy-Anfragen ausloesen.
-- `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` - optional, aber empfohlen (Cache).
-  Ohne diese Variablen funktioniert alles, nur ohne Cache - jede Anfrage kostet dann volle
-  Proxy-Zeit, auch bei identischen Wiederholungen.
+`maxDuration` steht auf 180 Sekunden, die interne Deadline auf 170. Nach jeder Gruppe wird
+gemessen, wie lange sie gedauert hat; die naechste startet nur, wenn sie nach dieser Erfahrung
+noch vor der Deadline fertig wird. Reicht die Zeit nicht, kommt die Antwort mit den bis dahin
+geprueften Laendern und `partial: true` zurueck. Der Frontend-Timeout (190 s) muss immer ueber
+`maxDuration` liegen.
 
-## Deployment
+## Zugangsdaten
 
-1. Auf vercel.com mit GitHub-Account registrieren (kostenloser "Hobby"-Plan).
-2. "Add New..." -> "Project" -> dieses Repo (`georates-price-api`) importieren.
-3. Vor dem ersten Deploy die Umgebungsvariablen oben eintragen.
-4. Deploy klicken. Die Funktion ist danach erreichbar unter
-   `https://<projekt>.vercel.app/api/check-price`.
+Dieses Repo ist oeffentlich, Zugangsdaten stehen deshalb ausschliesslich in
+Umgebungsvariablen und nie im Code:
 
-## Cloudflare Turnstile einrichten (kostenlos, Bot-Schutz)
+`SMARTPROXY_USER_PREFIX`, `SMARTPROXY_PASSWORD`, `SMARTPROXY_SERVER`,
+`TURNSTILE_SECRET_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
 
-1. dash.cloudflare.com -> kostenlos registrieren.
-2. Turnstile -> "Add Site" -> Domain `georates.tech` eintragen, Widget-Typ "Managed".
-3. Site Key (fuer die Website, Frontend) und Secret Key (fuer diese Funktion, als
-   `TURNSTILE_SECRET_KEY` in Vercel) kopieren.
+Ohne Turnstile-Key wird der Bot-Check uebersprungen, ohne Upstash laeuft alles ohne Cache.
 
-## Upstash Redis einrichten (kostenlos, Cache)
+## Logging
 
-1. upstash.com -> kostenlos registrieren (GitHub-Login moeglich).
-2. "Create Database" -> Name frei waehlbar, Region moeglichst nah an Vercel-Region waehlen.
-3. Im Datenbank-Dashboard unter "REST API" die Werte `UPSTASH_REDIS_REST_URL` und
-   `UPSTASH_REDIS_REST_TOKEN` kopieren, in Vercel eintragen.
+Jede Abfrage wird in einer Tabelle protokolliert: Zeitpunkt, Hotel-Link, Zimmer, Verpflegung,
+Stornowunsch, ermittelte Preise und das aus der IP abgeleitete Herkunftsland als Laenderkuerzel.
+Die IP selbst wird nicht gespeichert. Aus dem Hotel-Link werden vor dem Schreiben Session-ID
+und saemtliche Tracking-Parameter entfernt (`aid`, `label`, `sid`, `srpvid`, UTM, gclid und
+weitere); Hotel und Reisezeitraum bleiben stehen, weil sich ein Fund sonst nicht nachvollziehen
+laesst. Details in der [Datenschutzerklaerung](https://georates.tech/datenschutz.html).
 
 ## Bekannte Grenzen
 
-- Die Erweiterung auf weitere Laender laeuft gegen eine harte Deadline (170s) - bei sehr
-  langsamen Proxy-Antworten werden ggf. nicht alle 13 zusaetzlichen Laender erreicht, dann
-  kommt `partial: true` in der Antwort zurueck statt eines vollstaendigen Scans. Ein
-  "kein guenstigeres Land" aus einem gekuerzten Lauf ist entsprechend weniger belastbar.
-- Ein vollstaendiger Scan dauert rund zwei Minuten. Das ist eine bewusste Entscheidung
-  gegen Tempo und fuer Vollstaendigkeit: Ein abgebrochener Scan liefert ein "nichts gefunden",
-  das schlicht nicht stimmt. Der Frontend-Timeout (190s in `index.html`) muss deshalb immer
-  ueber `maxDuration` liegen.
-- Booking.com kann Proxy-Traffic trotzdem blocken/CAPTCHA zeigen - dann liefert die Funktion
-  fuer das betroffene Land keinen Preis, andere Laender koennen trotzdem erfolgreich sein.
-- Ohne Upstash-Variablen läuft alles, aber ohne Cache (jede Anfrage verbraucht volle
-  Proxy-Zeit/-Kosten, auch bei Wiederholungen derselben Suche).
+- Abgefragt wird ausgeloggt. Genius-Rabatte sind nicht enthalten, fuer Statusinhaber ist die
+  ausgewiesene Ersparnis eher eine Obergrenze.
+- Booking.com kann Proxy-Traffic blocken oder ein CAPTCHA zeigen. Betroffene Laender liefern
+  dann keinen Preis, die uebrigen koennen trotzdem durchlaufen.
+- Ein gekuerzter Lauf (`partial: true`) bedeutet nicht "kein guenstigeres Land gefunden",
+  sondern nur "nicht alle Laender geprueft".
+- Geraeteprofile fuer Windows, Mac, Android und iPhone sind vorhanden, Mobil ist aber
+  abgeschaltet: Booking liefert mobil ein anderes Layout, das der Parser noch nicht versteht.
+  Mobile Anfragen fallen auf das Windows-Profil zurueck.
+- Eine Einzelmessung ist eine Momentaufnahme. Derselbe Vergleich kann morgen anders ausgehen.
