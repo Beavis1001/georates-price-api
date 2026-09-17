@@ -1,7 +1,7 @@
 // Serverless Function: GeoRates Geo-Preisvergleich. Prueft den Preis eines konkreten
 // Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet
 // zurueck, ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt. Portiert die bereits
-// gehaertete Parsing-Logik aus dem lokalen `hotel_compare.py`-Skript nach JavaScript.
+// Parsing-Logik eines lokalen Python-Prototyps (nie veroeffentlicht) nach JavaScript.
 //
 // Kostenschutz (echter Proxy-Traffic kostet Geld, daher mehrfach abgesichert):
 //   1. Cloudflare Turnstile Bot-Check vor jeder Anfrage (siehe verifyTurnstile).
@@ -10,9 +10,9 @@
 //   3. Bilder/Fonts/Stylesheets werden beim Laden geblockt (nur Text noetig).
 //   4. Erst DE+CO parallel als schnelle Probe; nur wenn das keine klare Ersparnis zeigt,
 //      werden weitere Laender NACHEINANDER (nicht alle parallel, wegen Arbeitsspeicher)
-//      geprueft - begrenzt durch ein Zeitbudget, damit die Funktion nicht am Vercel-
-//      Zeitlimit scheitert. Wird das Budget waehrend der Erweiterung aufgebraucht, liefert
-//      die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
+//      geprueft. Eine weitere Ländergruppe wird nur gestartet, wenn sie nach der bisher
+//      gemessenen Gruppendauer noch vor dem Vercel-Zeitlimit fertig wird. Reicht die Zeit
+//      nicht, liefert die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
 
 const crypto = require('crypto');
 const chromium = require('@sparticuz/chromium-min');
@@ -51,9 +51,25 @@ const MAX_ATTEMPTS = 2;
 const EXPANSION_ATTEMPTS = 1;
 const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessigeres Laden            // wie viele Laender gleichzeitig (Arbeitsspeicher-Grenze)
 const MIN_LOADED_LINES = 300;
-// Vor jeder neuen Ländergruppe pruefen: ist mehr Zeit als dieses Budget verstrichen, wird
-// abgebrochen. 36s + max. eine ~20s-Gruppe + Antwort bleibt sicher unter dem 60s-Limit.
-const TIME_BUDGET_MS = 36000;
+// Zeitsteuerung der Erweiterungsphase.
+//
+// Frueher galt ein starres Budget von 36s: Wurde es ueberschritten, brach die Schleife ab.
+// Das hatte zwei Nachteile. Erstens wurde Zeit verschenkt - bei 35,9s startete noch eine
+// volle Gruppe, bei 36,1s keine mehr, obwohl noch 20s frei waren. Zweitens war genau der
+// erste Fall riskant: eine bei 35,9s gestartete Gruppe konnte bis ~56s laufen und damit das
+// 60s-Limit von Vercel streifen.
+//
+// Jetzt wird vorausschauend geplant: Wir messen, wie lange die letzte Gruppe wirklich
+// gedauert hat, und starten die naechste nur, wenn sie nach dieser Erfahrung noch vor
+// HARD_DEADLINE_MS fertig wird. Das nutzt das Zeitfenster deutlich besser aus UND kann das
+// Limit nicht mehr ueberfahren.
+const FUNCTION_LIMIT_MS = 60000;          // Vercel-Limit (siehe vercel.json)
+const RESPONSE_RESERVE_MS = 6000;         // Puffer fuer Zusammenfassung, Cache-Write, Logging, Antwort
+const HARD_DEADLINE_MS = FUNCTION_LIMIT_MS - RESPONSE_RESERVE_MS;
+// Schaetzung fuer die erste Gruppe (noch kein Messwert vorhanden) - bewusst pessimistisch.
+const FIRST_BATCH_ESTIMATE_MS = 14000;
+// Sicherheitsaufschlag auf die gemessene Gruppendauer: die naechste Gruppe kann langsamer sein.
+const BATCH_ESTIMATE_SAFETY = 1.25;
 const CACHE_TTL_SECONDS = 24 * 3600;
 
 const DEFAULT_CURRENCY_BY_COUNTRY = {
@@ -146,7 +162,7 @@ async function getLiveRates() {
   return null; // keine verlaesslichen Live-Kurse -> Aufrufer bricht ab
 }
 
-// ---- Preis-Parsing (1:1 Logik-Port aus hotel_compare.py) -------------------------------
+// ---- Preis-Parsing (1:1 Logik-Port aus dem Python-Prototyp) ----------------------------
 
 function parseAmount(rawText) {
   let digits = (rawText || '').replace(/[^\d.,]/g, '');
@@ -947,15 +963,33 @@ module.exports = async (req, res) => {
     if (!probeConclusive) {
       // Die restlichen Laender in PARALLELEN Gruppen pruefen (je 1 Versuch, damit's schnell
       // bleibt). Chromium ist bereits entpackt, daher ist Parallelitaet gefahrlos; die
-      // Gruppengroesse begrenzt den Arbeitsspeicher. Zeitbudget stoppt vor dem Vercel-Limit.
+      // Gruppengroesse begrenzt den Arbeitsspeicher.
+      //
+      // Die naechste Gruppe wird nur gestartet, wenn sie nach der bisher gemessenen Dauer
+      // auch noch fertig wird. So laeuft die Funktion weder ins Vercel-Limit noch bricht sie
+      // ab, obwohl noch Zeit fuer eine weitere Gruppe waere.
       const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
+      let batchEstimateMs = FIRST_BATCH_ESTIMATE_MS;
       for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-        if (Date.now() - startTime > TIME_BUDGET_MS) { partial = true; break; }
+        const elapsed = Date.now() - startTime;
+        if (elapsed + batchEstimateMs > HARD_DEADLINE_MS) {
+          partial = true;
+          console.log(`[check-price] Erweiterung gestoppt nach ${(elapsed / 1000).toFixed(1)}s: ` +
+            `naechste Gruppe braucht geschaetzt ${(batchEstimateMs / 1000).toFixed(1)}s, ` +
+            `Deadline ${(HARD_DEADLINE_MS / 1000).toFixed(0)}s. ` +
+            `${remaining.length - i} Land/Laender ungeprueft.`);
+          break;
+        }
         const batch = remaining.slice(i, i + BATCH_SIZE);
+        const batchStart = Date.now();
         const batchResults = await Promise.all(
           batch.map((c) => fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, EXPANSION_ATTEMPTS))
         );
         results.push(...batchResults);
+        // Schaetzung fortschreiben: gemessene Dauer plus Sicherheitsaufschlag. Wir nehmen den
+        // groesseren Wert aus alter und neuer Schaetzung nicht - sonst zieht ein einzelner
+        // Ausreisser die Planung dauerhaft nach oben und wir pruefen weniger Laender als moeglich.
+        batchEstimateMs = Math.round((Date.now() - batchStart) * BATCH_ESTIMATE_SAFETY);
       }
       summary = summarize(results, baselineCountry);
     }
@@ -984,7 +1018,9 @@ module.exports = async (req, res) => {
         relevant: summary.relevantSaving ? 'ja' : 'nein',
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
-        status: partial ? 'ok (Zeitbudget, nicht alle Länder)' : 'ok',
+        // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
+        // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
+        status: partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok',
       });
     } else {
       await logAttempt('kein Preis gefunden', { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
