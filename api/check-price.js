@@ -57,6 +57,12 @@ const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessig
 // ab da warten die Instanzen nur noch aufeinander.
 const EXPANSION_BATCH_SIZE = 4;
 const MIN_LOADED_LINES = 300;
+// Obergrenze fuer die Laenge eines Zimmernamens. Das ist eine Plausibilitaetsbremse gegen
+// versehentlich mitgelesene Textabsaetze - KEIN inhaltliches Kriterium. Frueher standen hier
+// 55 bis 70 Zeichen, und das hat echte Zimmer verschluckt: Booking haengt Unterscheidungen
+// hinten an ("... - kleinere Villa"), und solche Namen kommen leicht auf ueber 70 Zeichen.
+// Ausgerechnet die guenstigste Kategorie eines Hotels fiel dadurch aus der Auswahl.
+const ROOM_NAME_MAX_LEN = 140;
 // Zeitsteuerung der Erweiterungsphase.
 //
 // Frueher galt ein starres Budget von 36s: Wurde es ueberschritten, brach die Schleife ab.
@@ -215,7 +221,7 @@ function extractAbsoluteExtraTax(context) {
 }
 
 function looksLikeNewRoomHeading(lines, idx) {
-  if (idx >= lines.length || lines[idx].length > 60) return false;
+  if (idx >= lines.length || lines[idx].length > ROOM_NAME_MAX_LEN) return false;
   for (let j = idx + 1; j < Math.min(idx + 1 + ROOM_CARD_LOOKAHEAD, lines.length); j++) {
     if (lines[j].includes('m²')) return true;
   }
@@ -410,7 +416,9 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
     let roomData = [];
     let roomMeta = null;
     try {
-      const ev = await page.evaluate(() => {
+      // ROOM_NAME_MAX_LEN wird hineingereicht: der Code unten laeuft im Browser, dort sind die
+      // Konstanten dieser Datei nicht sichtbar.
+      const ev = await page.evaluate((ROOM_NAME_MAX_LEN) => {
         const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
         const boardsOf = (t) => {
           t = t.toLowerCase();
@@ -450,7 +458,14 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
             if (!firstTd) continue;
             const a = firstTd.querySelector('a');
             const nm = a ? clean(a.innerText) : '';
-            if (nm && nm.length >= 3 && nm.length <= 70) cur = nm;
+            // Laengenobergrenze nur als Schutz gegen versehentlich gegriffene Textabsaetze.
+            // Sie war mit 70 viel zu knapp: Booking haengt an Zimmernamen gern Zusaetze an
+            // ("... - kleinere Villa", "... mit Meerblick"), und genau die laengeren Namen
+            // gehoeren oft zu den GUENSTIGSTEN Kategorien. Ein Name mit 71 Zeichen fiel so
+            // lautlos raus - der Nutzer sah drei statt vier Zimmern und ausgerechnet das
+            // billigste fehlte. Die eigentliche Absicherung ist hier ohnehin die Struktur
+            // (erster Link in der Zimmerzeile der Zimmertabelle), nicht die Laenge.
+            if (nm && nm.length >= 3 && nm.length <= ROOM_NAME_MAX_LEN) cur = nm;
             if (cur) addRow(cur, row.innerText);
           }
           if (order.length) { strategy = 1; break; }
@@ -460,7 +475,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
           const sel = 'a.hprt-roomtype-icon-link, .hprt-roomtype-link, [data-testid="room-name"], [data-testid="rt-title"], [data-component="room-type-name"]';
           for (const el of document.querySelectorAll(sel)) {
             const nm = clean(el.innerText || el.textContent);
-            if (nm && nm.length >= 3 && nm.length <= 70) addRow(nm, '');
+            if (nm && nm.length >= 3 && nm.length <= ROOM_NAME_MAX_LEN) addRow(nm, '');
           }
           if (order.length) strategy = 2;
         }
@@ -473,7 +488,7 @@ async function attemptFetch(targetUrl, proxyServer, proxyAuth) {
           bodyHasStorno: /stornier/i.test((document.body && document.body.innerText) || ''),
         };
         return { rooms, meta };
-      });
+      }, ROOM_NAME_MAX_LEN);
       roomData = ev.rooms || [];
       roomMeta = ev.meta || null;
     } catch (e) { roomData = []; }
@@ -660,12 +675,20 @@ const NOT_ROOM_RE = /m²|€|\$|\beur\b|usd|egp|cop|thb|inr|ars|try|lkr|vnd|idr|
 
 function isRoomName(lines, idx) {
   const l = (lines[idx] || '').trim();
-  if (l.length < 3 || l.length > 55) return false;
+  // Auch hier war die alte Grenze (55) zu eng. Dass eine Zeile ein Zimmername ist, entscheiden
+  // die Pruefungen darunter (Zimmertyp-Wort vorhanden, keine Preis-/Belegungs-/Storno-Begriffe),
+  // nicht ihre Laenge.
+  if (l.length < 3 || l.length > ROOM_NAME_MAX_LEN) return false;
   if (l.includes(':')) return false;                 // "Schlafzimmer 1: ...", "Bis 12:00"
   if (/^\d/.test(l)) return false;                   // "1 Schlafsofa", "2 Einzelbetten und"
   if (!ROOM_TYPE_RE.test(l)) return false;           // muss ein Zimmertyp-Wort enthalten
   if (NOT_ROOM_RE.test(l)) return false;
-  if (/\d/.test(l) && BED_RE.test(l)) return false;  // Bett-Angabe, kein Name
+  // Frueher stand hier: Zeile enthaelt eine Ziffer UND ein Bett-Wort -> kein Zimmername.
+  // Die Regel sollte Zeilen wie "1 Schlafsofa" oder "2 Einzelbetten" aussortieren, hat aber
+  // viel zu breit gegriffen: "Villa mit 1 Schlafzimmer, Kingsize-Bett und Schlafsofa" ist ein
+  // voellig normaler Zimmername und flog ebenfalls raus. Die eigentlichen Bett-Zeilen faengt
+  // schon der Test oben ab (sie beginnen mit einer Ziffer oder enthalten einen Doppelpunkt)
+  // bzw. die Pflicht auf ein Zimmertyp-Wort.
   return true;
 }
 
