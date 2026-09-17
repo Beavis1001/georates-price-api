@@ -2,19 +2,25 @@
 
 Serverless-Endpunkt fuer den GeoRates Geo-Preisvergleich: prueft den Preis eines konkreten
 Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet zurueck,
-ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt. Portiert die bereits gehaertete
-Parsing-Logik aus dem lokalen `hotel_compare.py`-Skript.
+ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt.
+
+Implementiert in JavaScript (Node, `puppeteer-core` + headless Chromium). Die Parsing-Logik
+stammt urspruenglich aus einem lokalen Python-Prototyp (`hotel_compare.py`), der nie
+veroeffentlicht wurde und hier nicht enthalten ist - der gesamte produktive Code liegt
+in `api/check-price.js`.
 
 ## Ablauf pro Anfrage
 
 1. Cloudflare-Turnstile-Token pruefen (Bot-Schutz).
 2. Cache pruefen (Upstash Redis, 24h) - bei Treffer sofort Antwort ohne Proxy-Traffic.
 3. Schnelle Probe: Deutschland + Kolumbien parallel.
-4. Zeigt die Probe keine klare Ersparnis (>= 3%), werden weitere Laender NACHEINANDER
-   geprueft (Bilder/Fonts/Stylesheets werden dabei geblockt, um Traffic zu sparen) - begrenzt
-   durch ein Zeitbudget (45s), damit die Funktion nicht am Vercel-Zeitlimit scheitert. Wird das
-   Budget aufgebraucht, kommt die Antwort mit den bis dahin geprueften Laendern plus
-   `partial: true` zurueck.
+4. Zeigt die Probe keine klare Ersparnis (>= 10%), werden weitere Laender in kleinen Gruppen
+   geprueft (Bilder/Fonts/Stylesheets werden dabei geblockt, um Traffic zu sparen). Die
+   Zeitsteuerung ist vorausschauend: Nach jeder Gruppe wird gemessen, wie lange sie gedauert
+   hat, und die naechste Gruppe nur gestartet, wenn sie nach dieser Erfahrung noch vor der
+   Deadline (54s, also Vercel-Limit minus Puffer fuer Antwort und Logging) fertig wird.
+   Reicht die Zeit nicht, kommt die Antwort mit den bis dahin geprueften Laendern plus
+   `partial: true` zurueck; im Log steht dann, wie viele Laender geprueft wurden.
 5. Ergebnis wird gecacht (24h) und zurueckgegeben.
 
 Wechselkurse werden bei jeder (nicht gecachten) Anfrage live abgerufen (open.er-api.com,
@@ -58,9 +64,10 @@ Zugangsdaten stehen bewusst NICHT im Code (dieses Repo ist oeffentlich):
 
 ## Bekannte Grenzen
 
-- Die Erweiterung auf weitere Laender ist zeitbudgetiert (45s) - bei sehr langsamen
-  Proxy-Antworten werden ggf. nicht alle 14 zusaetzlichen Laender erreicht, dann kommt
-  `partial: true` in der Antwort zurueck statt eines vollstaendigen Scans.
+- Die Erweiterung auf weitere Laender laeuft gegen eine harte Deadline (54s) - bei sehr
+  langsamen Proxy-Antworten werden ggf. nicht alle 13 zusaetzlichen Laender erreicht, dann
+  kommt `partial: true` in der Antwort zurueck statt eines vollstaendigen Scans. Ein
+  "kein guenstigeres Land" aus einem gekuerzten Lauf ist entsprechend weniger belastbar.
 - Booking.com kann Proxy-Traffic trotzdem blocken/CAPTCHA zeigen - dann liefert die Funktion
   fuer das betroffene Land keinen Preis, andere Laender koennen trotzdem erfolgreich sein.
 - Ohne Upstash-Variablen läuft alles, aber ohne Cache (jede Anfrage verbraucht volle
