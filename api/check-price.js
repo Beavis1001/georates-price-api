@@ -37,9 +37,14 @@ const ALL_COUNTRIES = ['DE', 'CO', 'AR', 'EG', 'IN', 'VN', 'ID', 'PK', 'LK', 'PE
 const CHEAP_PROBE_COUNTRY = 'CO';
 // Ausgangsland (Referenzpreis), falls es sich nicht aus dem Link ableiten laesst.
 const DEFAULT_BASELINE_COUNTRY = 'DE';
-// Kolumbien (bzw. das beste Land) muss MINDESTENS so viel Prozent guenstiger sein als das
-// Ausgangsland, damit die Probe als eindeutig gilt bzw. ein Laenderwechsel empfohlen wird.
+// Ab dieser Ersparnis empfehlen wir aktiv einen Laenderwechsel per VPN.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
+// Frueher wurde die Suche abgebrochen, sobald Kolumbien diese Schwelle riss. Das ist aus:
+// siehe die ausfuehrliche Begruendung an der Verwendungsstelle weiter unten. Auf true
+// gesetzt spart es Proxy-Traffic, liefert dafuer aber nur "ein gutes" statt "dem besten"
+// Land - und liefert vor allem keine Daten mehr zu der offenen Frage, ob Kolumbien
+// tatsaechlich fast immer vorne liegt.
+const STOP_EARLY_ON_CLEAR_WIN = false;
 // Unterhalb dieser Schwelle ist ein Preisunterschied blosses Rauschen (Wechselkurs-Rundung,
 // Nachkommastellen). Solche Treffer werden NICHT als "guenstigeres Land" verkauft - weder im
 // Ergebnis noch im Deal-Log. Sonst wirkt das Tool, als wolle es um jeden Preis etwas finden.
@@ -1040,15 +1045,27 @@ module.exports = async (req, res) => {
     let summary = summarize(results, baselineCountry);
     let partial = false;
 
-    // Erweitern, wenn der Guenstig-Kandidat nicht mindestens 10% guenstiger als das Ausgangsland
-    // ist (oder das Ausgangsland/CO keinen Preis lieferte). Dann alle restlichen Laender pruefen.
-    const baseR = results.find((r) => r.country === baselineCountry);
-    const cheapR = results.find((r) => r.country === CHEAP_PROBE_COUNTRY);
-    let probeConclusive = false;
-    if (baseR && cheapR && baseR.priceEuro !== null && cheapR.priceEuro !== null) {
+    // Frueher wurde hier abgebrochen, sobald Kolumbien mindestens 10% guenstiger war als das
+    // Ausgangsland ("gut genug gefunden, Rest sparen"). Das ist raus, und zwar aus einem
+    // belegbaren Grund: Am 17.09. lag bei derselben Suite Kolumbien bei 11%, Indien aber bei
+    // 19,3%. Mit der alten Regel haette das Tool bei Kolumbien aufgehoert und 8 Prozentpunkte
+    // liegen lassen - und dabei behauptet, das guenstigste Land gefunden zu haben.
+    //
+    // Die zwei urspruenglichen Gruende fuer den Abbruch sind beide entfallen: Ein Voll-Scan
+    // passt inzwischen bequem ins Zeitlimit, und dank Streaming sieht der Nutzer den ersten
+    // Treffer nach ~20s, muss also aufs Ende gar nicht warten, um ihn zu kennen.
+    //
+    // Uebrig bleibt nur der Proxy-Traffic. Den nehmen wir bewusst in Kauf: Ein Tool, das
+    // verspricht das guenstigste Land zu finden, darf nicht bei "gut genug" stehenbleiben.
+    // Solange nicht belegt ist, dass Kolumbien praktisch immer gewinnt, ist jeder frueh
+    // abgebrochene Scan ausserdem ein Datenpunkt weniger fuer genau diese Frage.
+    const probeConclusive = STOP_EARLY_ON_CLEAR_WIN && (() => {
+      const baseR = results.find((r) => r.country === baselineCountry);
+      const cheapR = results.find((r) => r.country === CHEAP_PROBE_COUNTRY);
+      if (!baseR || !cheapR || baseR.priceEuro === null || cheapR.priceEuro === null) return false;
       const diffPct = ((cheapR.priceEuro - baseR.priceEuro) / baseR.priceEuro) * 100;
-      probeConclusive = diffPct <= -PROBE_CONFIDENCE_THRESHOLD_PCT;
-    }
+      return diffPct <= -PROBE_CONFIDENCE_THRESHOLD_PCT;
+    })();
 
     if (!probeConclusive) {
       // Die restlichen Laender in PARALLELEN Gruppen pruefen (je 1 Versuch, damit's schnell
