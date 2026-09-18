@@ -9,7 +9,7 @@
 
 const fs=require('fs');
 const src=fs.readFileSync('api/check-price.js','utf8');
-const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/];
+const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/];
 let code='const ROOM_NAME_MAX_LEN = 140;\nconst BACKSCAN_LINES = 6;\n'; for(const re of teile){const m=src.match(re); if(!m){console.error('FEHLT',re);process.exit(1);} code+=m[0]+'\n';}
 eval(code);
 let fehler=0;
@@ -30,5 +30,18 @@ const alt = ['Studio mit Kingsize-Bett','Belegung: 2 Erwachsene','Vergleichen',
  'Preis € 1.589','Einschließlich Steuern und Gebühren','Kostenlose Stornierung','Zimmer auswählen'].join('\n');
 pruefe('17.09.: Wunsch kostenlos stornierbar', alt,'Studio mit Kingsize-Bett','uebernachtung','ja','1.589',null);
 pruefe('17.09.: Wunsch nicht stornierbar',     alt,'Studio mit Kingsize-Bett','uebernachtung','nein','1.523',null);
+
+// --- Verpflegungs-/Storno-Optionen fuers Dropdown ---------------------------------------
+function pruefeOptionen(name, bt, zimmer, erwarteteBoards){
+  const o = computeRoomOptions(bt, [zimmer])[zimmer] || { boards: [], cancels: [] };
+  const ist = [...o.boards].sort().join(',');
+  const soll = [...erwarteteBoards].sort().join(',');
+  const ok = ist === soll;
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Verpflegung ['+ist+'] Storno ['+o.cancels.join(',')+']');
+}
+pruefeOptionen('Zimmer ohne Verpflegungszeile = Uebernachtung', bt,'Superior Double Room with Harbour View',['uebernachtung']);
+pruefeOptionen('Zimmer mit Fruehstueck inbegriffen',            bt,'Komfort-Doppelzimmer',['fruehstueck']);
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
