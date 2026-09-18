@@ -262,18 +262,12 @@ function looksLikeNewRoomHeading(lines, idx) {
   return false;
 }
 
-function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
-  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
-  const roomLower = roomName.toLowerCase();
-  let start = null;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i].toLowerCase();
-    if (l === roomLower || l.startsWith(roomLower)) { start = i; break; }
-  }
-  if (start === null) return [null, null];
-
-  const maxEnd = Math.min(start + 250, lines.length);
-  const rawTiers = []; // { amount, anchor }
+// Zerlegt den Textblock eines Zimmers in seine Tarifstufen. Ausgelagert, weil BEIDE Stellen
+// dieselbe Sicht brauchen: die Preis-Erkennung unten und die Verpflegungs-/Storno-Optionen
+// fuers Dropdown. Solange die Optionsliste anders segmentierte als der Parser, bot das
+// Formular Tarife an, die es nicht gab - und verschwieg welche, die es gab.
+function tarifstufen(lines, start, maxEnd) {
+  const rawTiers = []; // { amount, cur, anchor, blockStart }
   let lastAmountLine = -1;
   let k = start + 1;
   while (k < maxEnd) {
@@ -309,14 +303,10 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
     }
     k++;
   }
+  if (!rawTiers.length) return [];
 
-  if (!rawTiers.length) return [null, null];
-
-  // Kontext je Ratenstufe bis zur NAECHSTEN Stufe begrenzen (max. 14 Zeilen), damit die
-  // Verpflegungs-/Stornierungserkennung nicht in die naechste Rate "ausblutet".
   // Genius-Abzug dieser Stufe suchen. Er steht VOR der "Gesamt"-Zeile, also im Block zwischen
-  // der vorigen Stufe und dem Anker dieser Stufe - der Kontext unten (ab Anker) reicht dafuer
-  // nicht. Muster: Zeile "Genius-Rabatt", direkt darunter "- € 48,53".
+  // der vorigen Stufe und dem Anker dieser Stufe - der Kontext ab Anker reicht dafuer nicht.
   const geniusAbzugIm = (blockStart, anchor) => {
     for (let i = Math.max(0, blockStart); i <= anchor && i < lines.length; i++) {
       if (!GENIUS_LINE_RE.test(lines[i])) continue;
@@ -328,11 +318,35 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
     return null;
   };
 
-  const tiers = rawTiers.map((t, i) => {
-    const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : lines.length;
+  // Kontext je Stufe bis zur NAECHSTEN Stufe begrenzen (max. 14 Zeilen), damit die
+  // Verpflegungs-/Stornierungserkennung nicht in die naechste Rate "ausblutet".
+  return rawTiers.map((t, i) => {
+    // Ende der letzten Stufe am Fenster des Zimmers festmachen, NICHT am Dateiende: sonst
+    // blutet der Kontext ins naechste Zimmer und dessen "Fruehstueck inbegriffen" wird
+    // faelschlich diesem Zimmer zugeschrieben.
+    const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : maxEnd;
     const end = Math.min(nextAnchor, t.anchor + 14);
-    return [t.amount, lines.slice(t.anchor, end).join('\n'), t.cur, geniusAbzugIm(t.blockStart, t.anchor)];
+    return {
+      amount: t.amount, cur: t.cur, anchor: t.anchor, blockStart: t.blockStart,
+      ctx: lines.slice(t.anchor, end).join('\n'),
+      genius: geniusAbzugIm(t.blockStart, t.anchor),
+    };
   });
+}
+
+function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
+  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
+  const roomLower = roomName.toLowerCase();
+  let start = null;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].toLowerCase();
+    if (l === roomLower || l.startsWith(roomLower)) { start = i; break; }
+  }
+  if (start === null) return [null, null];
+
+  const stufen = tarifstufen(lines, start, Math.min(start + 250, lines.length));
+  if (!stufen.length) return [null, null];
+  const tiers = stufen.map((t) => [t.amount, t.ctx, t.cur, t.genius]);
 
   // Deutsche Umlaute vereinheitlichen, damit z.B. Formularwert "fruehstueck" zu "Frühstück"
   // auf der Seite passt (frueher schlug dieser Vergleich fehl -> falsche Rate).
@@ -1088,7 +1102,7 @@ function cancelsFromText(t) {
 // Fuer jeden Zimmernamen den Textabschnitt vom ersten Vorkommen bis zum naechsten Zimmernamen
 // scannen und daraus Verpflegung/Storno bestimmen.
 function computeRoomOptions(bodyText, names) {
-  const lines = (bodyText || '').split('\n').map((l) => l.trim());
+  const lines = (bodyText || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const positions = names
     .map((n) => {
       const nl = n.toLowerCase();
@@ -1097,12 +1111,43 @@ function computeRoomOptions(bodyText, names) {
     })
     .filter((p) => p.idx >= 0)
     .sort((a, b) => a.idx - b.idx);
+
+  // Gleiche Sicht wie die Preis-Erkennung: erst in Tarifstufen zerlegen, dann je Stufe
+  // bestimmen, was sie bietet. Frueher wurde der ganze Zimmerblock in einen Topf geworfen -
+  // damit war jede Stufe "Fruehstueck", sobald irgendeine Stufe Fruehstueck enthielt.
+  const boardOfCtx = (ctx) => {
+    for (const line of (ctx || '').split('\n')) { const b = boardOfLine(line); if (b) return b; }
+    return null;
+  };
+  const cancelOfCtx = (ctx) => {
+    for (const line of (ctx || '').split('\n')) { const c = cancelOfLine(line); if (c) return c; }
+    return null;
+  };
+
   const result = {};
   for (let i = 0; i < positions.length; i++) {
     const start = positions[i].idx;
     const end = i + 1 < positions.length ? positions[i + 1].idx : Math.min(lines.length, start + 60);
-    const span = lines.slice(start, end).join('\n');
-    result[positions[i].name] = { boards: boardsFromText(span), cancels: cancelsFromText(span) };
+    const stufen = tarifstufen(lines, start, end);
+    const boards = new Set();
+    const cancels = new Set();
+    for (const t of stufen) {
+      // Kein Verpflegungshinweis an einer Stufe MIT Preis heisst bei Booking "ohne Verpflegung".
+      // "Fruehstueck inbegriffen" wird hingeschrieben, wenn es inbegriffen ist - sonst steht da
+      // nichts. Wer nur sammelt, was dasteht, kann "Nur Uebernachtung" nie anbieten, obwohl es
+      // der haeufigste und oft guenstigste Tarif ist.
+      boards.add(boardOfCtx(t.ctx) || 'uebernachtung');
+      const c = cancelOfCtx(t.ctx);
+      if (c) cancels.add(c);
+    }
+    // Fallback fuer Zimmer ohne erkennbare Tarifstufen: wie bisher den ganzen Block ansehen,
+    // dann aber OHNE die Annahme "ohne Hinweis = Uebernachtung" (dafuer fehlt der Preisbezug).
+    if (!stufen.length) {
+      const span = lines.slice(start, end).join('\n');
+      for (const b of boardsFromText(span)) boards.add(b);
+      for (const c of cancelsFromText(span)) cancels.add(c);
+    }
+    result[positions[i].name] = { boards: [...boards], cancels: [...cancels] };
   }
   return result;
 }
