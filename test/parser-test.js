@@ -1,0 +1,34 @@
+// Parser-Regressionstest ohne Netzwerk und ohne Browser: zieht die reinen Textfunktionen
+// aus api/check-price.js und prueft sie gegen gespeicherte Seitenausschnitte.
+//
+// Aufruf:  node test/parser-test.js
+//
+// Die Vorlage in test/seite-genius.txt ist ein ECHTER Booking-Seitenausschnitt (Tarifstruktur
+// mit Genius-Rabatt), aber mit erfundenen Zimmer- und Hotelnamen - Suchen von Besuchern
+// gehoeren nicht in ein oeffentliches Repository.
+
+const fs=require('fs');
+const src=fs.readFileSync('api/check-price.js','utf8');
+const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/];
+let code='const ROOM_NAME_MAX_LEN = 140;\nconst BACKSCAN_LINES = 6;\n'; for(const re of teile){const m=src.match(re); if(!m){console.error('FEHLT',re);process.exit(1);} code+=m[0]+'\n';}
+eval(code);
+let fehler=0;
+function pruefe(name, bt, room, board, cancel, erwartetBetrag, erwartetGenius){
+  const [amt,,cur,gen]=findRoomPrice(bt,room,board,cancel);
+  const ok = String(amt)===String(erwartetBetrag) && String(gen)===String(erwartetGenius);
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' Genius '+String(gen));
+}
+const bt=fs.readFileSync('test/seite-genius.txt','utf8');
+pruefe('Genius-Seite, Uebernachtung/egal', bt,'Superior Double Room with Harbour View','uebernachtung','unsicher','251,27',48.53);
+pruefe('Genius-Seite, storno ja',           bt,'Superior Double Room with Harbour View','uebernachtung','ja','270,29',52.2);
+pruefe('Zimmer ohne Genius',                bt,'Komfort-Doppelzimmer','fruehstueck','ja','300',null);
+
+// Regression: der Fall vom 17.09. (1523 nicht stornierbar vs 1589 kostenlos stornierbar)
+const alt = ['Studio mit Kingsize-Bett','Belegung: 2 Erwachsene','Vergleichen',
+ 'Preis € 1.523','Einschließlich Steuern und Gebühren','Nicht kostenlos stornierbar','Zimmer auswählen',
+ 'Preis € 1.589','Einschließlich Steuern und Gebühren','Kostenlose Stornierung','Zimmer auswählen'].join('\n');
+pruefe('17.09.: Wunsch kostenlos stornierbar', alt,'Studio mit Kingsize-Bett','uebernachtung','ja','1.589',null);
+pruefe('17.09.: Wunsch nicht stornierbar',     alt,'Studio mit Kingsize-Bett','uebernachtung','nein','1.523',null);
+console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
+process.exit(fehler?1:0);
