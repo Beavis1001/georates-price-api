@@ -111,6 +111,37 @@ function detectBaselineCountry(link) {
   return DEFAULT_BASELINE_COUNTRY;
 }
 
+// ---- Link fuer den Abruf auf Deutsch zwingen ---------------------------------------------
+// Der gesamte Parser ist deutschsprachig: Er sucht nach "Steuern und Gebuehren", "kostenlos
+// stornierbar", "Fruehstueck". Kommt die Seite in einer anderen Sprache zurueck, trifft davon
+// nichts und die Anfrage endet mit "kein Preis gefunden" - ohne dass der Nutzer erfaehrt,
+// warum. Genau das ist am 17.09. zwei Besuchern aus Oesterreich passiert, deren Link die
+// englische Variante war (".html" ohne Sprachkuerzel plus lang=en-us).
+//
+// Accept-Language allein reicht nicht: Der lang-Parameter in der URL sticht den Header aus.
+// Deshalb wird hier beides erzwungen - Pfadendung und Parameter.
+//
+// WICHTIG: Diese Funktion darf erst NACH detectBaselineCountry() angewendet werden. Die
+// Sprachendung des Original-Links ist die einzige Information darueber, aus welchem Land der
+// Nutzer kommt; wer sie vorher ueberschreibt, macht aus jedem Besucher einen Deutschen.
+// Ins Log gehoert ebenfalls der Originallink, sonst faellt nie wieder auf, dass jemand mit
+// einem fremdsprachigen Link kam.
+const WAEHRUNGS_PARAMS = ['selected_currency', 'cur_currency', 'currency'];
+function normalisiereLinkFuerAbruf(link) {
+  try {
+    const u = new URL(link);
+    // ".en-us.html" / ".es.html" -> ".de.html"; Links ohne Sprachkuerzel bleiben unangetastet,
+    // die liefert Booking schon anhand des Accept-Language-Headers deutsch aus.
+    u.pathname = u.pathname.replace(/\.([a-z]{2}(?:-[a-z]{2})?)\.html$/i, (treffer, lang) =>
+      /^de(-[a-z]{2})?$/i.test(lang) ? treffer : '.de.html');
+    u.searchParams.set('lang', 'de');
+    // Eine im Link festgenagelte Waehrung wuerde jede Laender-Sitzung dieselbe Waehrung zeigen
+    // lassen - dann ist die Spalte "Preis vor Ort" wertlos und der Vergleich misst nichts mehr.
+    for (const p of WAEHRUNGS_PARAMS) u.searchParams.delete(p);
+    return u.toString();
+  } catch (e) { return link; }
+}
+
 // ---- Proxy-Traffic sparen -----------------------------------------------------------------
 // Jedes geladene Byte kostet Guthaben. Fuer die Preiserkennung brauchen wir nur das HTML der
 // Hotelseite und Bookings eigene Skripte - Bilder, Schriften, Videos, Tracker und alle
@@ -1101,6 +1132,8 @@ module.exports = async (req, res) => {
     try {
       try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
       const baselineCountry = detectBaselineCountry(link);
+      // Reihenfolge beachten: erst Baseline aus dem Originallink lesen, dann auf Deutsch zwingen.
+      const abrufLink = normalisiereLinkFuerAbruf(link);
 
       // Zimmer zuerst aus den DOM-Links der Zimmertabelle nehmen (r.rooms, inkl. Verpflegungs-/
       // Storno-Optionen); nur wenn leer, faellt es auf die Text-Heuristik (nur Namen) zurueck.
@@ -1128,7 +1161,7 @@ module.exports = async (req, res) => {
       // sehen, ob der Parser die mobile Seitenstruktur ueberhaupt versteht.
       const device = resolveDevice(req.body && req.body.device, !!(req.body && req.body.debug));
       for (let a = 1; a <= 2 && !withOpts; a++) {
-        const r = await attemptFetch(link, srv, proxyAuth, blockScripts, device);
+        const r = await attemptFetch(abrufLink, srv, proxyAuth, blockScripts, device);
         lastR = r;
         if (r.loadedOk) {
           const rl = roomsFrom(r);
@@ -1137,7 +1170,7 @@ module.exports = async (req, res) => {
       }
       // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
       if (!withOpts && !namesOnly) {
-        const r = await attemptFetch(link, null, null, blockScripts, device);
+        const r = await attemptFetch(abrufLink, null, null, blockScripts, device);
         lastR = r;
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
@@ -1267,6 +1300,9 @@ module.exports = async (req, res) => {
 
     // Ausgangsland (Referenzpreis) aus dem Booking-Link ableiten - nicht zwingend Deutschland.
     const baselineCountry = detectBaselineCountry(link);
+    // Erst danach den Link fuer den Abruf auf Deutsch zwingen (Parser ist deutschsprachig).
+    // `link` bleibt unveraendert: er wird weiter fuers Log und fuer die Antwort gebraucht.
+    const abrufLink = normalisiereLinkFuerAbruf(link);
 
     // Geraeteprofil gilt fuer ALLE Laender derselben Abfrage. Sonst waere der Vergleich wertlos:
     // Wir wollen den Laendereffekt messen, nicht Land gegen Geraet.
@@ -1289,7 +1325,7 @@ module.exports = async (req, res) => {
     // als wuerde das Tool raten.
     let basePriceForGuard = null;
     const fetchAndStream = (c, attempts) =>
-      fetchPrice(c, link, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
+      fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
         .then((r) => {
           if (c !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
             r.priceEuro = null;
