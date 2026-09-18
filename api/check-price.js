@@ -225,6 +225,14 @@ const PRICE_PREFIX_RE = /^Preis\s+([^\d\s]{1,6})\s*([\d][\d.,]*)\s*$/;
 const EXCLUSIVE_TAX_LINE_RE = /nicht inbegriffen[:\s]*(.+)/i;
 const PCT_TOKEN_RE = /([\d]+(?:[.,]\d+)?)\s*%/g;
 const ROOM_CARD_LOOKAHEAD = 3;
+// Genius ist Bookings Treueprogramm. Der Rabatt gilt NUR eingeloggt ("...wenn Sie sich
+// anmelden oder sich kostenlos registrieren"), Booking zieht ihn aber trotzdem von der
+// "Gesamt"-Summe ab, die eine ausgeloggte Sitzung angezeigt bekommt. Wer das nicht
+// herausrechnet, meldet einen Preis, den der Nutzer so nicht bezahlen kann - und vergleicht
+// ausserdem Aepfel mit Birnen, sobald Booking den Rabatt nicht in jedem Land anzeigt.
+// "Genius-Praemien" (Sammelbegriff weiter unten auf der Seite) darf hier NICHT greifen.
+const GENIUS_LINE_RE = /genius[-\s]?rabatt/i;
+const NEG_AMOUNT_RE = /^[-\u2013\u2212]\s*([^\d\s]{1,6})\s*([\d][\d.,]*)\s*$/;
 const BACKSCAN_LINES = 6;
 
 function extractExclusiveTaxPct(context) {
@@ -274,7 +282,7 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
     const pm = PRICE_PREFIX_RE.exec(lines[k]);
     if (pm) {
       lastAmountLine = k;
-      rawTiers.push({ amount: pm[2], cur: pm[1], anchor: k });
+      rawTiers.push({ amount: pm[2], cur: pm[1], anchor: k, blockStart: rawTiers.length ? rawTiers[rawTiers.length - 1].anchor + 1 : start });
     } else if (TAX_LINE_RE.test(lines[k])) {
       // "Einschliesslich Steuern und Gebühren" steht IMMER direkt unter dem zugehoerigen
       // Preis. Hat dieser Preis eine Zeile vorher schon eine Ratenstufe erzeugt, darf hier
@@ -296,7 +304,7 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
           const m = AMOUNT_LINE_RE.exec(lines[back]);
           if (m) { amount = m[2]; cur = m[1]; break; }
         }
-        if (amount) rawTiers.push({ amount, cur, anchor: k });
+        if (amount) rawTiers.push({ amount, cur, anchor: k, blockStart: rawTiers.length ? rawTiers[rawTiers.length - 1].anchor + 1 : start });
       }
     }
     k++;
@@ -306,10 +314,24 @@ function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
 
   // Kontext je Ratenstufe bis zur NAECHSTEN Stufe begrenzen (max. 14 Zeilen), damit die
   // Verpflegungs-/Stornierungserkennung nicht in die naechste Rate "ausblutet".
+  // Genius-Abzug dieser Stufe suchen. Er steht VOR der "Gesamt"-Zeile, also im Block zwischen
+  // der vorigen Stufe und dem Anker dieser Stufe - der Kontext unten (ab Anker) reicht dafuer
+  // nicht. Muster: Zeile "Genius-Rabatt", direkt darunter "- € 48,53".
+  const geniusAbzugIm = (blockStart, anchor) => {
+    for (let i = Math.max(0, blockStart); i <= anchor && i < lines.length; i++) {
+      if (!GENIUS_LINE_RE.test(lines[i])) continue;
+      for (let j = i + 1; j <= Math.min(i + 2, anchor); j++) {
+        const m = NEG_AMOUNT_RE.exec(lines[j]);
+        if (m) { const v = parseAmount(m[2]); if (v !== null) return v; }
+      }
+    }
+    return null;
+  };
+
   const tiers = rawTiers.map((t, i) => {
     const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : lines.length;
     const end = Math.min(nextAnchor, t.anchor + 14);
-    return [t.amount, lines.slice(t.anchor, end).join('\n'), t.cur];
+    return [t.amount, lines.slice(t.anchor, end).join('\n'), t.cur, geniusAbzugIm(t.blockStart, t.anchor)];
   });
 
   // Deutsche Umlaute vereinheitlichen, damit z.B. Formularwert "fruehstueck" zu "Frühstück"
@@ -731,7 +753,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     return result;
   }
 
-  const [rawAmt, ctx, curTok] = findRoomPrice(bodyText, room, board, cancel);
+  const [rawAmt, ctx, curTok, geniusAbzug] = findRoomPrice(bodyText, room, board, cancel);
   // Waehrung aus der tatsaechlichen Preiszeile ableiten (Fallback: Landeswaehrung).
   const currency = normalizeCurrency(curTok, expectedCurrency || 'EUR');
   if (rawAmt) {
@@ -746,6 +768,16 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
       result.priceRaw = `${rawAmt} (${currency}, zzgl. ${absExtra} ${currency} Steuern -> steuerinkl.: ${val})`;
     } else {
       result.priceRaw = `${rawAmt} (${currency}, inkl. Steuern & Gebühren)`;
+    }
+    // Genius herausrechnen. Booking zieht den Rabatt auch einer ausgeloggten Sitzung von der
+    // Gesamtsumme ab, zahlbar ist er aber nur mit Konto. Ohne diese Korrektur meldet das Tool
+    // einen Preis, den der Nutzer nicht bekommt - und schlimmer: Zeigt Booking den Rabatt in
+    // einem Land an und im anderen nicht, misst der Laendervergleich nur noch den Rabatt.
+    if (val !== null && geniusAbzug) {
+      const vorher = val;
+      val = Math.round((val + geniusAbzug) * 100) / 100;
+      result.geniusHerausgerechnet = geniusAbzug;
+      result.priceRaw += ` | ohne Genius: ${vorher} + ${geniusAbzug} = ${val} (Genius gilt nur eingeloggt)`;
     }
     result.currency = currency;
     result.priceLocal = val; // Betrag in der Landeswaehrung (zur VPN-Kontrolle im Frontend)
