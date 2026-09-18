@@ -1226,7 +1226,11 @@ module.exports = async (req, res) => {
           const rn = (rooms && rooms[0] && rooms[0].name) || '';
           const idx = ls.findIndex((l) => l.toLowerCase().startsWith(rn.toLowerCase()));
           const [amt] = rn ? findRoomPrice(bt, rn, '', '') : [null];
-          payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + 22) : [] };
+          // Fensterbreite einstellbar (debugLines): 22 Zeilen reichen, um den ersten Preis zu
+          // sehen, aber nicht, um die Tarifstufen eines Zimmers nachzuvollziehen - genau die
+          // braucht man aber, wenn die Verpflegungs-Optionen unvollstaendig sind.
+          const fenster = Math.min(Math.max(parseInt(req.body.debugLines, 10) || 22, 5), 160);
+          payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + fenster) : [] };
           // Mit debug:'price' den ECHTEN Preis-Pfad fuers Ausgangsland durchlaufen lassen.
           if (req.body.debug === 'price' && rn) {
             // Ohne zweiten Browserstart: die Preis-Kette auf dem BEREITS geladenen Seitentext pruefen.
