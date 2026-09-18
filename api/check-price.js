@@ -699,6 +699,9 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
   let bodyText = null;
   let loadedOk = false;
   let lastErr = null;
+  // Zimmerliste aus dem DOM der Zimmertabelle - deutlich sauberer als die Text-Heuristik
+  // (die faengt sonst "Zimmer auswaehlen", "Eigenes Badezimmer" oder Bewertungszeilen mit ein).
+  let roomData = [];
 
   // Traffic ueber ALLE Versuche dieses Landes summieren - Fehlversuche kosten genauso.
   result.transferBytes = 0;
@@ -709,6 +712,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     bodyText = r.bodyText;
     loadedOk = r.loadedOk;
     lastErr = r.err;
+    if (r.rooms && r.rooms.length) roomData = r.rooms;
     if (loadedOk && expectedCurrency) {
       const seen = detectSessionCurrency(bodyText);
       // Nur protokollieren, NICHT verwerfen: Booking zeigt z.B. bei US-Hotels auch in einer
@@ -759,8 +763,10 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     // Seite steht, damit das Frontend dem Nutzer den Weg zeigen kann statt ihn wegzuschicken.
     // Reine Textarbeit auf dem ohnehin geladenen bodyText, also kein zusaetzlicher Traffic.
     try {
-      const namen = listRooms(bodyText);
-      const opts = enrichRoomOptions(bodyText, namen.map((n) => ({ name: n, boards: [], cancels: [] })));
+      const basis = roomData.length
+        ? roomData
+        : listRooms(bodyText).map((n) => ({ name: n, boards: [], cancels: [] }));
+      const opts = enrichRoomOptions(bodyText, basis);
       const gesucht = String(room || '').trim().toLowerCase();
       const treffer = opts.find((o) => o.name.trim().toLowerCase() === gesucht);
       result.diagnose = {
@@ -1384,7 +1390,16 @@ module.exports = async (req, res) => {
     // 8 Prozentpunkte liegen lassen und dabei behauptet, das guenstigste Land gefunden zu haben.
     // Sie hat ausserdem die eigene Statistik verzerrt, weil kein anderes Land je gewinnen konnte.
     // Es werden deshalb immer alle Laender geprueft; der zusaetzliche Proxy-Traffic ist der Preis.
-    {
+    //
+    // EINE Ausnahme gibt es, und die kostet nichts an Aussagekraft: Steht das gesuchte Zimmer
+    // auf der Hotelseite ueberhaupt nicht, wird es auch kein anderes Land finden. Solche Suchen
+    // liefen bisher trotzdem durch alle 15 Laender - rund 35 MB Proxy-Traffic fuer ein Ergebnis,
+    // das nach dem ersten Land feststand. Am 17.09. ist das zweimal hintereinander passiert.
+    const zimmerFehltAufDerSeite = !!(probeBase && probeBase.diagnose && probeBase.diagnose.zimmerGefunden === false);
+    if (zimmerFehltAufDerSeite) {
+      console.log(`[check-price] Zimmer "${room}" steht nicht auf der Hotelseite - Erweiterung uebersprungen.`);
+    }
+    if (!zimmerFehltAufDerSeite) {
       // Die restlichen Laender in PARALLELEN Gruppen pruefen (je 1 Versuch, damit's schnell
       // bleibt). Chromium ist bereits entpackt, daher ist Parallelitaet gefahrlos; die
       // Gruppengroesse begrenzt den Arbeitsspeicher.
