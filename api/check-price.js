@@ -790,7 +790,7 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     if (val !== null && geniusAbzug) {
       const vorher = val;
       val = Math.round((val + geniusAbzug) * 100) / 100;
-      result.geniusHerausgerechnet = geniusAbzug;
+      result.geniusHerausgerechnet = geniusAbzug; // geht mit in die Antwort (Hinweis im Frontend)
       result.priceRaw += ` | ohne Genius: ${vorher} + ${geniusAbzug} = ${val} (Genius gilt nur eingeloggt)`;
     }
     result.currency = currency;
@@ -1011,9 +1011,8 @@ function summarize(results, baselineCountry) {
 }
 
 // ---- Alle Zimmernamen einer Hotelseite auflisten (fuer das Dropdown im Formular) ----------
-// Nutzt dieselbe Heuristik wie die Zimmererkennung: eine Zeile ist eine Zimmer-Ueberschrift,
-// wenn kurz danach eine Flaechenangabe ("... m²") folgt.
-const BED_RE = /doppelbett|einzelbett|zweibett|etagenbett|schlafsofa|schlafcouch|\bbett\b|\bbetten\b/i;
+// Reine Text-Heuristik als Rueckfallebene. Bevorzugt wird die Zimmerliste aus dem DOM der
+// Zimmertabelle (siehe attemptFetch -> rooms), die ist deutlich sauberer.
 // Ein echter Zimmername enthaelt praktisch immer ein Unterkunfts-/Zimmertyp-Wort. Das ist ein viel
 // verlaesslicheres Signal als "steht neben einer Bett-Angabe" (dort landete sonst Ausstattung wie
 // "Ventilator" oder "Schrank", weil die Ausstattungsliste direkt neben den Betten steht).
@@ -1390,7 +1389,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const userPrefix = process.env.SMARTPROXY_USER_PREFIX; // z.B. "smart-ut1nl7crifne_area-"
+  const userPrefix = process.env.SMARTPROXY_USER_PREFIX; // Form: "<konto>_area-", Landescode wird angehaengt
   const password = process.env.SMARTPROXY_PASSWORD;
   const proxyServer = process.env.SMARTPROXY_SERVER || 'http://proxy.smartproxy.net:3120';
   if (!userPrefix || !password) {
