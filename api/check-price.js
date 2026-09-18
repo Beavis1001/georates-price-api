@@ -751,6 +751,28 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
     }
   } else {
     result.priceRaw = `Zimmer "${room}" auf dieser Landes-Session nicht gefunden/verfügbar`;
+    // Diagnose statt Sackgasse: "kein Preis gefunden" ist die nutzloseste aller Antworten,
+    // wenn der Grund schlicht ein Zimmername ist, den es auf der Seite nie gab. Genau das
+    // ist am 17.09. passiert - jemand suchte "Superior Zimmer", das Hotel hatte aber nur
+    // "Superior Double Room with Hagia Sophia View". Zwei Versuche, zweimal nichts, dabei
+    // waeren ueber Japan 10,9 % drin gewesen. Deshalb sammeln wir hier, was wirklich auf der
+    // Seite steht, damit das Frontend dem Nutzer den Weg zeigen kann statt ihn wegzuschicken.
+    // Reine Textarbeit auf dem ohnehin geladenen bodyText, also kein zusaetzlicher Traffic.
+    try {
+      const namen = listRooms(bodyText);
+      const opts = enrichRoomOptions(bodyText, namen.map((n) => ({ name: n, boards: [], cancels: [] })));
+      const gesucht = String(room || '').trim().toLowerCase();
+      const treffer = opts.find((o) => o.name.trim().toLowerCase() === gesucht);
+      result.diagnose = {
+        zimmerGefunden: !!treffer,
+        verpflegungPasst: treffer
+          ? (!board || board === 'egal' || !(treffer.boards || []).length || treffer.boards.includes(board))
+          : null,
+        zimmerAufSeite: opts.slice(0, 12).map((o) => ({
+          name: o.name, boards: o.boards || [], cancels: o.cancels || [],
+        })),
+      };
+    } catch (e) { /* Diagnose ist Zugabe - ein Fehler darf die Antwort nicht kippen */ }
   }
   return result;
 }
@@ -916,7 +938,12 @@ function summarize(results, baselineCountry) {
   }
 
   const withPrice = results.filter((r) => r.priceEuro !== null);
-  if (!withPrice.length) return { success: false, reason: 'price_not_found', results, baselineCountry };
+  if (!withPrice.length) {
+    // Die Diagnose des Ausgangslandes mitgeben (nur die ist aussagekraeftig: dort wurde die
+    // Seite in der Sprache und Waehrung geladen, die der Nutzer selbst sieht).
+    const baseDiag = (baseRow && baseRow.diagnose) || (results.find((r) => r.diagnose) || {}).diagnose || null;
+    return { success: false, reason: 'price_not_found', results, baselineCountry, diagnose: baseDiag };
+  }
 
   const best = withPrice.reduce((a, b) => (b.priceEuro < a.priceEuro ? b : a));
   const baseline = results.find((r) => r.country === baselineCountry);
@@ -1333,7 +1360,10 @@ module.exports = async (req, res) => {
             r.priceRaw = 'Preis nicht verlässlich erkannt';
             r.implausible = true;
           }
-          streamSend({ type: 'country', result: r });
+          // Die Diagnose (Zimmerliste der Seite) bleibt im Ergebnis, wird aber nicht pro Land
+          // gestreamt - sonst schickt ein Fehlschlag 15x dieselbe Liste durch die Leitung.
+          const { diagnose, ...fuerDieTabelle } = r;
+          streamSend({ type: 'country', result: fuerDieTabelle });
           return r;
         });
 
@@ -1385,6 +1415,10 @@ module.exports = async (req, res) => {
       }
       summary = summarize(results, baselineCountry);
     }
+
+    // Die Zimmerliste haengt jetzt einmal an summary.diagnose; an den einzelnen Laendern
+    // waere sie nur Ballast in der Antwort (und im Cache).
+    for (const r of results) delete r.diagnose;
 
     const payload = { ...summary, partial };
     if (summary.success) {
