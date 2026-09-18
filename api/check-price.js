@@ -1,18 +1,18 @@
 // Serverless Function: GeoRates Geo-Preisvergleich. Prueft den Preis eines konkreten
 // Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet
-// zurueck, ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt. Portiert die bereits
-// Parsing-Logik eines lokalen Python-Prototyps (nie veroeffentlicht) nach JavaScript.
+// zurueck, ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt.
 //
 // Kostenschutz (echter Proxy-Traffic kostet Geld, daher mehrfach abgesichert):
-//   1. Cloudflare Turnstile Bot-Check vor jeder Anfrage (siehe verifyTurnstile).
+//   1. Cloudflare Turnstile Bot-Check vor jeder Preis-Anfrage (siehe verifyTurnstile).
 //   2. Ergebnis-Cache (Upstash Redis, 24h) - identische Anfragen loesen keinen neuen
 //      Proxy-Traffic aus.
 //   3. Bilder/Fonts/Stylesheets werden beim Laden geblockt (nur Text noetig).
-//   4. Erst DE+CO parallel als schnelle Probe; nur wenn das keine klare Ersparnis zeigt,
-//      werden weitere Laender NACHEINANDER (nicht alle parallel, wegen Arbeitsspeicher)
-//      geprueft. Eine weitere Ländergruppe wird nur gestartet, wenn sie nach der bisher
-//      gemessenen Gruppendauer noch vor dem Vercel-Zeitlimit fertig wird. Reicht die Zeit
-//      nicht, liefert die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
+//   3a. Der "rooms"-Modus laeuft ohne Turnstile (leichter Abruf), dafuer mit einer Zaehlbremse
+//      pro IP - sonst waere er der billigste Weg, Proxy-Traffic zu verbrennen.
+//   4. Erst DE+CO parallel als schnelle Probe, danach die uebrigen Laender in Gruppen.
+//      Eine weitere Laendergruppe wird nur gestartet, wenn sie nach der bisher gemessenen
+//      Gruppendauer noch vor dem Vercel-Zeitlimit fertig wird. Reicht die Zeit nicht,
+//      liefert die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
 
 const crypto = require('crypto');
 const chromium = require('@sparticuz/chromium-min');
@@ -39,27 +39,18 @@ const CHEAP_PROBE_COUNTRY = 'CO';
 const DEFAULT_BASELINE_COUNTRY = 'DE';
 // Ab dieser Ersparnis empfehlen wir aktiv einen Laenderwechsel per VPN.
 const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
-// Frueher wurde die Suche abgebrochen, sobald Kolumbien diese Schwelle riss. Das ist aus:
-// siehe die ausfuehrliche Begruendung an der Verwendungsstelle weiter unten. Auf true
-// gesetzt spart es Proxy-Traffic, liefert dafuer aber nur "ein gutes" statt "dem besten"
-// Land - und liefert vor allem keine Daten mehr zu der offenen Frage, ob Kolumbien
-// tatsaechlich fast immer vorne liegt.
-const STOP_EARLY_ON_CLEAR_WIN = false;
 // Unterhalb dieser Schwelle ist ein Preisunterschied blosses Rauschen (Wechselkurs-Rundung,
 // Nachkommastellen). Solche Treffer werden NICHT als "guenstigeres Land" verkauft - weder im
 // Ergebnis noch im Deal-Log. Sonst wirkt das Tool, als wolle es um jeden Preis etwas finden.
 const RELEVANT_SAVINGS_PCT = 1.0;
-// Ausgangsland + Kolumbien: 2 Versuche (Referenzpreis MUSS verlaesslich sein). Dank der kurzen
-// Einzel-Timeouts unten bleiben selbst 2 Versuche pro Land klar unter dem 60s-Limit von Vercel.
+// Ausgangsland + Kolumbien: 2 Versuche (der Referenzpreis MUSS verlaesslich sein).
 // Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
 const MAX_ATTEMPTS = 2;
 const EXPANSION_ATTEMPTS = 1;
-const BATCH_SIZE = 2; // weniger gleichzeitige Chromium-Instanzen = zuverlaessigeres Laden
-// In der Erweiterungsphase duerfen es mehr sein: dort zaehlt nur 1 Versuch pro Land, ein
-// verpasstes Land ist unkritisch, und seit der Umstellung auf 2 GB (vercel.json) ist genug
-// Arbeitsspeicher fuer mehr gleichzeitige Chromium-Instanzen da. Das halbiert die Laufzeit
-// eines vollstaendigen Scans. Hoeher als 4 bringt wenig: der Hobby-Plan hat nur 1 vCPU,
-// ab da warten die Instanzen nur noch aufeinander.
+// Wie viele Laender in der Erweiterungsphase gleichzeitig geprueft werden. Seit der Umstellung
+// auf 2 GB (vercel.json) ist genug Arbeitsspeicher fuer mehrere Chromium-Instanzen da; das
+// halbiert die Laufzeit eines vollstaendigen Scans. Hoeher als 4 bringt wenig: der Hobby-Plan
+// hat nur 1 vCPU, ab da warten die Instanzen nur noch aufeinander.
 const EXPANSION_BATCH_SIZE = 4;
 const MIN_LOADED_LINES = 300;
 // Obergrenze fuer die Laenge eines Zimmernamens. Das ist eine Plausibilitaetsbremse gegen
@@ -68,22 +59,15 @@ const MIN_LOADED_LINES = 300;
 // hinten an ("... - kleinere Villa"), und solche Namen kommen leicht auf ueber 70 Zeichen.
 // Ausgerechnet die guenstigste Kategorie eines Hotels fiel dadurch aus der Auswahl.
 const ROOM_NAME_MAX_LEN = 140;
-// Zeitsteuerung der Erweiterungsphase.
+// Zeitsteuerung der Erweiterungsphase: vorausschauend statt mit starrem Budget. Wir messen,
+// wie lange die letzte Gruppe wirklich gedauert hat, und starten die naechste nur, wenn sie
+// nach dieser Erfahrung noch vor HARD_DEADLINE_MS fertig wird. Das nutzt das Zeitfenster
+// besser aus als eine feste Schranke und kann das Limit nicht ueberfahren.
 //
-// Frueher galt ein starres Budget von 36s: Wurde es ueberschritten, brach die Schleife ab.
-// Das hatte zwei Nachteile. Erstens wurde Zeit verschenkt - bei 35,9s startete noch eine
-// volle Gruppe, bei 36,1s keine mehr, obwohl noch 20s frei waren. Zweitens war genau der
-// erste Fall riskant: eine bei 35,9s gestartete Gruppe konnte bis ~56s laufen und damit das
-// 60s-Limit von Vercel streifen.
-//
-// Jetzt wird vorausschauend geplant: Wir messen, wie lange die letzte Gruppe wirklich
-// gedauert hat, und starten die naechste nur, wenn sie nach dieser Erfahrung noch vor
-// HARD_DEADLINE_MS fertig wird. Das nutzt das Zeitfenster deutlich besser aus UND kann das
-// Limit nicht mehr ueberfahren.
-// Seit Vercel "Fluid Compute" (im Projekt aktiv) erlaubt auch der kostenlose Hobby-Plan bis zu
-// 300s pro Funktion - die alte 60s-Grenze gilt nicht mehr. Wir nehmen NICHT das Maximum: 15
-// Laender brauchen erfahrungsgemaess ~100-120s, und jede Sekunde Laufzeit ist bezahlter
-// Proxy-Traffic. 180s lassen genug Luft, begrenzen aber einen entgleisten Lauf.
+// Mit Vercel "Fluid Compute" (im Projekt aktiv) erlaubt auch der kostenlose Hobby-Plan bis zu
+// 300s pro Funktion. Wir nehmen NICHT das Maximum: 15 Laender brauchen erfahrungsgemaess
+// ~100-120s, und jede Sekunde Laufzeit ist bezahlter Proxy-Traffic. 180s lassen genug Luft,
+// begrenzen aber einen entgleisten Lauf.
 // WICHTIG: Dieser Wert muss zu maxDuration in vercel.json passen.
 const FUNCTION_LIMIT_MS = 180000;         // Vercel-Limit (siehe vercel.json)
 const RESPONSE_RESERVE_MS = 10000;        // Puffer fuer Zusammenfassung, Cache-Write, Logging, Antwort
@@ -135,10 +119,11 @@ const BLOCKED_RESOURCE_TYPES = new Set([
   'image', 'media', 'font', 'stylesheet', 'other',
   'texttrack', 'websocket', 'manifest', 'eventsource', 'ping', 'cspviolationreport',
 ]);
-// Schalter fuer den Preis-Pfad: Bookings eigene JavaScript-Bundles mitblocken. Das ist der
-// groesste Hebel beim Proxy-Verbrauch (Skripte sind der Grossteil der Bytes), darf aber erst
-// scharf geschaltet werden, wenn gemessen ist, dass die Zimmertabelle ohne sie vollstaendig
-// bleibt. Bis dahin false - im "rooms"-Modus laesst sich per noScripts:true einzeln testen.
+// Schalter fuer den Preis-Pfad: Bookings eigene JavaScript-Bundles mitblocken. Skripte sind
+// der Grossteil der uebertragenen Bytes, das waere also der groesste Hebel beim Proxy-Verbrauch.
+// Gemessen am 17.09.: Ohne Bookings JS liefert die Seite 0 Zimmer und praktisch keinen Text -
+// die Zimmertabelle wird komplett per JavaScript aufgebaut. Der Schalter bleibt deshalb aus.
+// Ueber den "rooms"-Modus laesst er sich mit noScripts:true jederzeit nachmessen.
 const BLOCK_BOOKING_SCRIPTS = false;
 // Nur Bookings eigene Domains duerfen laden (bstatic.com ist Bookings Asset-CDN).
 const ALLOWED_HOST_RE = /(^|\.)booking\.com$|(^|\.)bstatic\.com$/i;
@@ -792,6 +777,29 @@ async function cacheSet(key, value) {
   } catch (e) { /* ignorieren - Cache ist nur Optimierung, kein kritischer Pfad */ }
 }
 
+// ---- Einfache Zaehlbremse pro IP (Upstash) ----------------------------------------------
+// Gedacht fuer den "rooms"-Modus: Der laeuft bewusst ohne Turnstile, loest aber echten
+// Proxy-Traffic aus. Ohne Bremse koennte jemand den Endpunkt in einer Schleife aufrufen und
+// Kosten verursachen, ohne je einen Bot-Check zu sehen. Ist Upstash nicht konfiguriert, wird
+// nicht gebremst - wie beim Cache ist das ein Optimierungs-, kein Sicherheitsfundament.
+const ROOMS_RATE_LIMIT = 20;            // Abrufe ...
+const ROOMS_RATE_WINDOW_SECONDS = 3600; // ... pro IP und Stunde
+async function rateLimitUeberschritten(bucket, ip, limit, windowSeconds) {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token || !ip) return false;
+  const key = `rl:${bucket}:${crypto.createHash('sha256').update(ip).digest('hex').slice(0, 24)}`;
+  try {
+    const auth = { Authorization: `Bearer ${token}` };
+    const res = await fetch(`${url}/incr/${key}`, { headers: auth });
+    const json = await res.json();
+    const count = Number(json && json.result);
+    if (!Number.isFinite(count)) return false;
+    if (count === 1) await fetch(`${url}/expire/${key}/${windowSeconds}`, { headers: auth });
+    return count > limit;
+  } catch (e) { return false; }
+}
+
 // ---- Abfrage-Log (optional, an eine Google-Tabelle via Apps-Script-Webhook) ----------------
 
 const LOG_BOARD_LABEL = { uebernachtung: 'Nur Übernachtung', fruehstueck: 'Frühstück', halbpension: 'Halbpension', vollpension: 'Vollpension', allinclusive: 'All-Inclusive', egal: 'Egal' };
@@ -1081,6 +1089,11 @@ module.exports = async (req, res) => {
       res.status(400).json({ success: false, reason: 'invalid_link' });
       return;
     }
+    const roomsIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (await rateLimitUeberschritten('rooms', roomsIp, ROOMS_RATE_LIMIT, ROOMS_RATE_WINDOW_SECONDS)) {
+      res.status(429).json({ success: false, reason: 'rate_limited' });
+      return;
+    }
     const up = process.env.SMARTPROXY_USER_PREFIX;
     const pw = process.env.SMARTPROXY_PASSWORD;
     const srv = process.env.SMARTPROXY_SERVER || 'http://proxy.smartproxy.net:3120';
@@ -1299,29 +1312,13 @@ module.exports = async (req, res) => {
     let summary = summarize(results, baselineCountry);
     let partial = false;
 
-    // Frueher wurde hier abgebrochen, sobald Kolumbien mindestens 10% guenstiger war als das
-    // Ausgangsland ("gut genug gefunden, Rest sparen"). Das ist raus, und zwar aus einem
-    // belegbaren Grund: Am 17.09. lag bei derselben Suite Kolumbien bei 11%, Indien aber bei
-    // 19,3%. Mit der alten Regel haette das Tool bei Kolumbien aufgehoert und 8 Prozentpunkte
-    // liegen lassen - und dabei behauptet, das guenstigste Land gefunden zu haben.
-    //
-    // Die zwei urspruenglichen Gruende fuer den Abbruch sind beide entfallen: Ein Voll-Scan
-    // passt inzwischen bequem ins Zeitlimit, und dank Streaming sieht der Nutzer den ersten
-    // Treffer nach ~20s, muss also aufs Ende gar nicht warten, um ihn zu kennen.
-    //
-    // Uebrig bleibt nur der Proxy-Traffic. Den nehmen wir bewusst in Kauf: Ein Tool, das
-    // verspricht das guenstigste Land zu finden, darf nicht bei "gut genug" stehenbleiben.
-    // Solange nicht belegt ist, dass Kolumbien praktisch immer gewinnt, ist jeder frueh
-    // abgebrochene Scan ausserdem ein Datenpunkt weniger fuer genau diese Frage.
-    const probeConclusive = STOP_EARLY_ON_CLEAR_WIN && (() => {
-      const baseR = results.find((r) => r.country === baselineCountry);
-      const cheapR = results.find((r) => r.country === CHEAP_PROBE_COUNTRY);
-      if (!baseR || !cheapR || baseR.priceEuro === null || cheapR.priceEuro === null) return false;
-      const diffPct = ((cheapR.priceEuro - baseR.priceEuro) / baseR.priceEuro) * 100;
-      return diffPct <= -PROBE_CONFIDENCE_THRESHOLD_PCT;
-    })();
-
-    if (!probeConclusive) {
+    // Hier wurde die Suche frueher abgebrochen, sobald Kolumbien mindestens 10% guenstiger war
+    // als das Ausgangsland ("gut genug gefunden, Rest sparen"). Das ist ersatzlos raus: Am 17.09.
+    // lag bei derselben Suite Kolumbien bei 11%, Indien aber bei 19,3% - die alte Regel haette
+    // 8 Prozentpunkte liegen lassen und dabei behauptet, das guenstigste Land gefunden zu haben.
+    // Sie hat ausserdem die eigene Statistik verzerrt, weil kein anderes Land je gewinnen konnte.
+    // Es werden deshalb immer alle Laender geprueft; der zusaetzliche Proxy-Traffic ist der Preis.
+    {
       // Die restlichen Laender in PARALLELEN Gruppen pruefen (je 1 Versuch, damit's schnell
       // bleibt). Chromium ist bereits entpackt, daher ist Parallelitaet gefahrlos; die
       // Gruppengroesse begrenzt den Arbeitsspeicher.
