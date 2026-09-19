@@ -917,6 +917,25 @@ const LOG_BOARD_LABEL = { uebernachtung: 'Nur Übernachtung', fruehstueck: 'Frü
 const LOG_CANCEL_LABEL = { ja: 'Kostenlos stornierbar', teilweise: 'Teilweise erstattbar', nein: 'Nicht kostenlos stornierbar', unsicher: 'Egal' };
 const LOG_COUNTRY_LABEL = { DE: 'Deutschland', CO: 'Kolumbien', AR: 'Argentinien', EG: 'Ägypten', IN: 'Indien', VN: 'Vietnam', ID: 'Indonesien', PK: 'Pakistan', LK: 'Sri Lanka', PE: 'Peru', MX: 'Mexiko', PH: 'Philippinen', TH: 'Thailand', US: 'USA', JP: 'Japan' };
 
+// Bisher stand in der Tabelle nur das Siegerland. Ein Land, das regelmaessig Zweiter wird,
+// tauchte damit nie auf - und die Frage "liegt Land X systematisch daneben?" liess sich nicht
+// beantworten, obwohl alle Zahlen vorliegen. Deshalb alle geprueften Laender in eine Zelle.
+//
+// Format: DE:1292.06:EUR|JP:1264:JPY|US:-:USD  - feste Reihenfolge, "-" fuer "kein Preis".
+// Die Waehrung gehoert dazu: Nur an ihr laesst sich erkennen, welche Werte WIR umgerechnet
+// haben (alles ausser EUR). Genau die stehen im Verdacht, Scheinfunde zu erzeugen, weil
+// Booking mit eigenem Kurs verkauft (siehe OFFEN.md, Punkt 1).
+function alleLaenderFuersLog(results) {
+  const nachLand = new Map(results.map((r) => [r.country, r]));
+  return ALL_COUNTRIES
+    .filter((c) => nachLand.has(c))
+    .map((c) => {
+      const r = nachLand.get(c);
+      return `${c}:${r.priceEuro != null ? r.priceEuro : '-'}:${r.currency || '-'}`;
+    })
+    .join('|');
+}
+
 // Booking-Links enthalten neben Hotel und Reisedaten auch Kennungen, die nichts in einem
 // Protokoll zu suchen haben - allen voran "sid", die Kennung der Booking-SITZUNG des Nutzers.
 // Am 17.09. hat ein Forenmitglied seine eigene Hotelsuche in unserem Quelltext wiedererkannt;
@@ -1545,6 +1564,7 @@ module.exports = async (req, res) => {
         relevant: summary.relevantSaving ? 'ja' : 'nein',
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
+        alleLaender: alleLaenderFuersLog(results),
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
         // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
