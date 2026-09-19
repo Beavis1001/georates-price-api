@@ -9,7 +9,7 @@
 
 const fs=require('fs');
 const src=fs.readFileSync('api/check-price.js','utf8');
-const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/];
+const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/,/const ALL_COUNTRIES = [^\n]*\n/,/function alleLaenderFuersLog[\s\S]*?\n}\n/];
 let code='const ROOM_NAME_MAX_LEN = 140;\nconst BACKSCAN_LINES = 6;\n'; for(const re of teile){const m=src.match(re); if(!m){console.error('FEHLT',re);process.exit(1);} code+=m[0]+'\n';}
 eval(code);
 let fehler=0;
@@ -42,6 +42,22 @@ function pruefeOptionen(name, bt, zimmer, erwarteteBoards){
 }
 pruefeOptionen('Zimmer ohne Verpflegungszeile = Uebernachtung', bt,'Superior Double Room with Harbour View',['uebernachtung']);
 pruefeOptionen('Zimmer mit Fruehstueck inbegriffen',            bt,'Komfort-Doppelzimmer',['fruehstueck']);
+
+// --- Log-Zeile: alle geprueften Laender, nicht nur der Sieger ---------------------------
+function pruefeLog(name, results, soll){
+  const ist = alleLaenderFuersLog(results);
+  const ok = ist === soll;
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' '+ist);
+}
+pruefeLog('Reihenfolge fest, kein Preis wird "-"',
+  // absichtlich in falscher Reihenfolge uebergeben - die Ausgabe folgt ALL_COUNTRIES
+  [{country:'JP',priceEuro:1264,currency:'JPY'},
+   {country:'DE',priceEuro:1292.06,currency:'EUR'},
+   {country:'US',priceEuro:null,currency:'USD'}],
+  'DE:1292.06:EUR|US:-:USD|JP:1264:JPY');
+pruefeLog('Nicht geprueftes Land faellt weg',
+  [{country:'DE',priceEuro:100,currency:'EUR'}], 'DE:100:EUR');
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
