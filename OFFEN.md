@@ -52,18 +52,10 @@ hilfreich, der den Ausschnitt an einem gewaehlten Zimmer verankert statt an room
 Die Fehlermeldung nennt seit dem 19.09. keinen erfundenen Grund mehr, der Fehler selbst
 ist offen.
 
-## 3. Log speichert nur das Siegerland
+## 3. Relevanzschwelle pro Land
 
-Pro Suche wird nur das guenstigste Land geschrieben. Ein Land, das meistens Zweiter wird,
-taucht nie auf. Damit laesst sich nicht beantworten, ob ein Land systematisch daneben liegt
-— genau die Frage aus Punkt 1.
-
-Alle 15 Laenderwerte mitzuschreiben kostet keinen zusaetzlichen Traffic, die Zahlen liegen
-ohnehin vor. Danach sind echte Verteilungen statt Einzelfaellen moeglich.
-
-## 4. Relevanzschwelle pro Land
-
-Auswertung ueber 110 Eintraege (nur Siegerlaender, siehe Punkt 3):
+Auswertung ueber 110 Eintraege — alle vor dem 19.09. und damit nur Siegerlaender. Ab jetzt
+steht in Spalte Q jede Suche vollstaendig, die Tabelle laesst sich also bald neu rechnen:
 
 | Land | Siege | kleinster | Median | groesster |
 |---|---|---|---|---|
@@ -78,7 +70,7 @@ Peru gewinnt achtmal und liegt nie ueber 0,5 % — reines Rauschen. Aegypten fas
 Indien gewinnt nur, wenn es substanziell ist (kleinster Wert 3,7 %). Eine feste
 1-%-Schwelle fuer alle Laender passt dazu nicht.
 
-## 5. Waehrungshinweis in der Ergebnisanzeige
+## 4. Waehrungshinweis in der Ergebnisanzeige
 
 Booking bietet an, in der Waehrung der Landessitzung abzurechnen. Gemessen am 18.09.:
 423,86 € gegen 77.720 JPY, letzteres zum Tageskurs rund sieben Euro teurer. Das frisst
@@ -89,7 +81,7 @@ In der Ergebnisanzeige steht bisher nur „Karte ohne Fremdwaehrungsgebuehr" —
 die Bankgebuehr, nicht auf Bookings Umrechnung. Ergaenzen: immer in der Waehrung der
 Unterkunft zahlen, nie in der angebotenen.
 
-## 6. „Best of" auf der Startseite
+## 5. „Best of" auf der Startseite
 
 Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 
@@ -101,12 +93,12 @@ Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 - Die Datenschutzerklaerung nennt als Zweck bisher nur Verbesserung und Auswertung.
   Veroeffentlichung ist ein weiterer Zweck und gehoert dort benannt.
 
-## 7. Mobiler Parser
+## 6. Mobiler Parser
 
 `MOBILE_READY = false`. Geraeteprofile fuer Android und iPhone sind vorhanden, das mobile
 Layout versteht der Parser aber nicht. Mobile Anfragen fallen auf Windows zurueck.
 
-## 8. Referrer-Experiment
+## 7. Referrer-Experiment
 
 Anregung von krabbs (Travel-Dealz): Zieht eine Weiterleitung von trivago oder Miles & More
 eine andere Rate als der Direkteinstieg? Waere mit dem vorhandenen Aufbau messbar, weil der
@@ -124,3 +116,8 @@ wuerde sonst die eigenen Messungen verzerren.
   18.09. herausgerechnet.
 - **Fremdsprachige Links** werden vor dem Abruf auf Deutsch gezwungen (18.09.).
 - **Kolumbien-Abbruch** ersatzlos entfernt; er hatte die eigene Statistik erzeugt.
+- **Das Log speichert alle geprueften Laender** (19.09.), nicht mehr nur das Siegerland.
+  Spalte Q "Alle Laender", Format `DE:1292.06:EUR|JP:1264:JPY|US:-:USD` — feste Reihenfolge,
+  `-` fuer "kein Preis". Kostet keinen zusaetzlichen Traffic, die Zahlen lagen ohnehin vor.
+  Damit werden Punkt 1 und Punkt 3 aus Daten beantwortbar statt aus Einzelfaellen: an der
+  Waehrung ist ablesbar, welche Werte wir selbst umgerechnet haben.
