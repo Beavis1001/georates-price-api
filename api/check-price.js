@@ -815,8 +815,14 @@ async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, passw
       const opts = enrichRoomOptions(bodyText, basis);
       const gesucht = String(room || '').trim().toLowerCase();
       const treffer = opts.find((o) => o.name.trim().toLowerCase() === gesucht);
+      // Dritter Fall neben "Zimmer gibt es nicht" und "Verpflegung passt nicht": Das Zimmer
+      // steht auf der Seite, hat fuer diesen Zeitraum aber gar keine Tarifzeile - typischerweise
+      // ausgebucht. Ohne diese Unterscheidung landet der Nutzer beim allgemeinen Text, der ihm
+      // faelschlich fehlende Reisedaten unterstellt, obwohl sein Link welche hat.
+      const hatTarife = (o) => !!o && ((o.boards || []).length > 0 || (o.cancels || []).length > 0);
       result.diagnose = {
         zimmerGefunden: !!treffer,
+        ohneTarife: treffer ? !hatTarife(treffer) : null,
         verpflegungPasst: treffer
           ? (!board || board === 'egal' || !(treffer.boards || []).length || treffer.boards.includes(board))
           : null,
