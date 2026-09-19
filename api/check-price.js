@@ -965,6 +965,25 @@ function linkFuersLog(link) {
   }
 }
 
+// In welchem Land steht das Hotel? Booking verraet es im Pfad: /hotel/de/..., /hotel/th/...
+//
+// Warum das ins Log gehoert: Bisher laesst sich nur fragen "gewinnt Thailand ueberhaupt". Die
+// interessantere Frage ist "gewinnt Thailand bei THAILAENDISCHEN Hotels" - regionale Preisstufen
+// haengen vermutlich an der Lage der Unterkunft, nicht allein am Land der Sitzung. Ohne diese
+// Spalte wuerden wir Laender aussortieren, die nur nie ein passendes Hotel zu sehen bekamen.
+//
+// Kostet keine zusaetzliche Anfrage: Die Angabe steht im Link, den wir ohnehin haben.
+// Protokolliert wird das ISO-Kuerzel in Grossbuchstaben - dieselbe Schreibweise wie in
+// "Alle Laender", damit sich beide Spalten direkt vergleichen lassen.
+function hotelLandAusLink(link) {
+  try {
+    const treffer = new URL(link).pathname.match(/\/hotel\/([a-z]{2})\//i);
+    return treffer ? treffer[1].toUpperCase() : '';
+  } catch (e) {
+    return ''; // kein gueltiger Link - lieber leer als geraten
+  }
+}
+
 // Schreibt EINE Zeile pro Abfrage in die Google-Tabelle. Fehler werden verschluckt - das Logging
 // darf den Preis-Check niemals blockieren oder verzoegern.
 async function logQuery(entry) {
@@ -1385,6 +1404,7 @@ module.exports = async (req, res) => {
     relevant: 'nein',
     empfehlung: 'nein',
     status,
+    hotelLand: hotelLandAusLink(link),
     ...(extra || {}),
   });
 
@@ -1565,6 +1585,7 @@ module.exports = async (req, res) => {
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
         alleLaender: alleLaenderFuersLog(results),
+        hotelLand: hotelLandAusLink(link),
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
         // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
