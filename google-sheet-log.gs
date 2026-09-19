@@ -31,7 +31,10 @@ const HEADERS = [
   'Status',
   // Spalte Q: alle geprüften Länder einer Suche, nicht nur der Sieger.
   // Format: DE:1292.06:EUR|JP:1264:JPY|US:-:USD
-  'Alle Länder'
+  'Alle Länder',
+  // Spalte R: Land der Unterkunft (ISO-Kürzel aus dem Booking-Link).
+  // Erst damit lässt sich fragen, ob ein Land bei Hotels IN diesem Land besser abschneidet.
+  'Hotel-Land'
 ];
 
 function doPost(e) {
@@ -67,7 +70,8 @@ function doPost(e) {
       d.relevant || '',
       d.empfehlung || '',
       d.status || '',
-      d.alleLaender || ''
+      d.alleLaender || '',
+      d.hotelLand || ''
     ]);
 
     return ContentService.createTextOutput('ok');
