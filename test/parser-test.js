@@ -9,8 +9,13 @@
 
 const fs=require('fs');
 const src=fs.readFileSync('api/check-price.js','utf8');
-const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/,/const ALL_COUNTRIES = [^\n]*\n/,/function alleLaenderFuersLog[\s\S]*?\n}\n/,/function hotelLandAusLink[\s\S]*?\n}\n/];
+const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/,/const ALL_COUNTRIES = [^\n]*\n/,/function alleLaenderFuersLog[\s\S]*?\n}\n/,/function hotelLandAusLink[\s\S]*?\n}\n/,/const DEFAULT_CURRENCY_BY_COUNTRY = \{[\s\S]*?\n\};\n/,/const HOTEL_LAND_ALIAS = [^\n]*\n/,/const HOTEL_LAND_MUTTERLAND = \{[\s\S]*?\n\};\n/,/function proxyLandFuerHotel[\s\S]*?\n}\n/,/function laenderFuerDieseSuche[\s\S]*?\n}\n/];
 let code='const ROOM_NAME_MAX_LEN = 140;\nconst BACKSCAN_LINES = 6;\n'; for(const re of teile){const m=src.match(re); if(!m){console.error('FEHLT',re);process.exit(1);} code+=m[0]+'\n';}
+// Mit `const` deklarierte Werte bleiben im eval-Geltungsbereich und waeren hier draussen nicht
+// sichtbar - die Funktionen dagegen schon. Deshalb die benoetigten Konstanten ausdruecklich
+// herausreichen, statt sie im Test ein zweites Mal zu pflegen (sonst prueft der Test am Ende
+// seine eigene Kopie und nicht den echten Code).
+code += 'globalThis.ALL_COUNTRIES = ALL_COUNTRIES;\n';
 eval(code);
 let fehler=0;
 function pruefe(name, bt, room, board, cancel, erwartetBetrag, erwartetGenius){
@@ -44,8 +49,8 @@ pruefeOptionen('Zimmer ohne Verpflegungszeile = Uebernachtung', bt,'Superior Dou
 pruefeOptionen('Zimmer mit Fruehstueck inbegriffen',            bt,'Komfort-Doppelzimmer',['fruehstueck']);
 
 // --- Log-Zeile: alle geprueften Laender, nicht nur der Sieger ---------------------------
-function pruefeLog(name, results, soll){
-  const ist = alleLaenderFuersLog(results);
+function pruefeLog(name, results, soll, laender){
+  const ist = alleLaenderFuersLog(results, laender);
   const ok = ist === soll;
   if(!ok) fehler++;
   console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' '+ist);
@@ -71,6 +76,34 @@ pruefeHotelLand('deutsches Hotel', 'https://www.booking.com/hotel/de/beispielhof
 pruefeHotelLand('thailaendisches Hotel, fremde Sprache', 'https://www.booking.com/hotel/th/beispiel-resort.th.html', 'TH'); // leck-check-ok: frei erfundenes Hotel, stammt nicht aus dem Log
 pruefeHotelLand('Suchergebnisseite ohne Hotel', 'https://www.booking.com/searchresults.de.html?ss=Muenchen', '');
 pruefeHotelLand('kaputter Link', 'kein-link', '');
+
+// --- Dynamischer Platz fuer das Land der Unterkunft -------------------------------------
+// Anlass: Ein Hotel auf Réunion (RE) wurde gegen 13 aussereuropaeische Laender verglichen und
+// gegen keine einzige andere europaeische Sitzung. Alle Links hier sind erfunden.
+function pruefeListe(name, link, sollZusatz){
+  const liste = laenderFuerDieseSuche(link);
+  const zusatz = liste.filter((c) => !ALL_COUNTRIES.includes(c));
+  const ok = zusatz.join(',') === sollZusatz
+    // Das Zusatzland muss VORNE stehen, sonst kuerzt das Zeitlimit genau es weg.
+    && (!sollZusatz || liste[1] === sollZusatz)
+    // Kein Land darf doppelt vorkommen - sonst zahlen wir eine Abfrage zweimal.
+    && new Set(liste).size === liste.length;
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' +['+zusatz.join(',')+'] n='+liste.length);
+}
+pruefeListe('Réunion -> Frankreich (Mutterland)', 'https://www.booking.com/hotel/re/beispiel.de.html', 'FR');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('Grossbritannien: Booking schreibt /uk/', 'https://www.booking.com/hotel/uk/beispiel.de.html', 'GB');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('deutsches Hotel: kein Zusatz, keine Kosten', 'https://www.booking.com/hotel/de/beispiel.de.html', '');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('Japan steht schon in der festen Liste', 'https://www.booking.com/hotel/jp/beispiel.de.html', '');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('Tuerkei nur ueber den dynamischen Platz', 'https://www.booking.com/hotel/tr/beispiel.de.html', 'TR');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('Puerto Rico -> USA (schon in der Liste)', 'https://www.booking.com/hotel/pr/beispiel.de.html', '');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('unbekanntes Land: lieber gar nicht pruefen', 'https://www.booking.com/hotel/zz/beispiel.de.html', '');  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
+pruefeListe('kein Hotellink', 'https://www.booking.com/searchresults.de.html', '');
+
+// Die Log-Spalte muss der Liste DIESER Suche folgen, nicht der festen.
+pruefeLog('Zusatzland steht auch im Log',
+  [{country:'FR',priceEuro:119,currency:'EUR'},{country:'DE',priceEuro:125,currency:'EUR'}],
+  'DE:125:EUR|FR:119:EUR', laenderFuerDieseSuche('https://www.booking.com/hotel/re/beispiel.de.html'));  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
