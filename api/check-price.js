@@ -78,10 +78,61 @@ const FIRST_BATCH_ESTIMATE_MS = 14000;
 const BATCH_ESTIMATE_SAFETY = 1.25;
 const CACHE_TTL_SECONDS = 24 * 3600;
 
+// Landeswaehrung als RUECKFALL - die Waehrung wird zuerst aus der Preiszeile der Seite gelesen.
+// Gebraucht wird der Eintrag vor allem bei mehrdeutigen Zeichen: Ein nacktes "$" steht in
+// Argentinien, Mexiko, Chile und Kolumbien fuer die Landeswaehrung, nicht fuer US-Dollar.
+//
+// Die Tabelle geht ueber die 15 festen Laender hinaus, seit es den dynamischen Platz fuer das
+// Land der Unterkunft gibt (siehe laenderFuerDieseSuche). Sie ist zugleich die Freigabeliste:
+// Nur fuer ein Land, dessen Waehrung wir kennen, starten wir eine zusaetzliche Sitzung. Lieber
+// ein Land weniger pruefen als einen Betrag in einer geratenen Waehrung in die Tabelle schreiben.
 const DEFAULT_CURRENCY_BY_COUNTRY = {
+  // Die 15 festen Laender
   DE: 'EUR', US: 'USD', CO: 'COP', TH: 'THB', IN: 'INR', EG: 'EGP', AR: 'ARS',
-  TR: 'TRY', LK: 'LKR', VN: 'VND', ID: 'IDR', PK: 'PKR', PE: 'PEN',
+  LK: 'LKR', VN: 'VND', ID: 'IDR', PK: 'PKR', PE: 'PEN',
   MX: 'MXN', PH: 'PHP', JP: 'JPY',
+  // Europa
+  FR: 'EUR', IT: 'EUR', ES: 'EUR', PT: 'EUR', NL: 'EUR', BE: 'EUR', AT: 'EUR', IE: 'EUR',
+  GR: 'EUR', FI: 'EUR', EE: 'EUR', LV: 'EUR', LT: 'EUR', SK: 'EUR', SI: 'EUR', LU: 'EUR',
+  MT: 'EUR', CY: 'EUR', HR: 'EUR', ME: 'EUR', XK: 'EUR',
+  GB: 'GBP', CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK', PL: 'PLN', CZ: 'CZK', HU: 'HUF',
+  RO: 'RON', BG: 'BGN', RS: 'RSD', UA: 'UAH', IS: 'ISK', AL: 'ALL', BA: 'BAM', MK: 'MKD',
+  MD: 'MDL', GE: 'GEL', AM: 'AMD', AZ: 'AZN',
+  // Tuerkei: bei den festen Laendern bewusst ausgelassen (von dort sind keine internationalen
+  // Buchungen moeglich). Fuer ein TUERKISCHES Hotel ist die tuerkische Sitzung aber genau der
+  // Inlandsfall, um den es hier geht - deshalb auf dem dynamischen Platz erlaubt.
+  TR: 'TRY',
+  // Amerika
+  CA: 'CAD', BR: 'BRL', CL: 'CLP', UY: 'UYU', PY: 'PYG', BO: 'BOB', EC: 'USD', PA: 'USD',
+  CR: 'CRC', GT: 'GTQ', DO: 'DOP', JM: 'JMD', TT: 'TTD', BS: 'BSD', BB: 'BBD',
+  // Asien
+  CN: 'CNY', HK: 'HKD', TW: 'TWD', KR: 'KRW', SG: 'SGD', MY: 'MYR', BD: 'BDT', NP: 'NPR',
+  KH: 'KHR', LA: 'LAK', MN: 'MNT', KZ: 'KZT', UZ: 'UZS', MV: 'MVR', BN: 'BND',
+  // Naher Osten
+  AE: 'AED', SA: 'SAR', QA: 'QAR', KW: 'KWD', BH: 'BHD', OM: 'OMR', JO: 'JOD', IL: 'ILS',
+  // Afrika
+  MA: 'MAD', TN: 'TND', ZA: 'ZAR', KE: 'KES', TZ: 'TZS', UG: 'UGX', NG: 'NGN', GH: 'GHS',
+  ET: 'ETB', MU: 'MUR', SC: 'SCR', NA: 'NAD', BW: 'BWP', ZM: 'ZMW',
+  // Ozeanien
+  AU: 'AUD', NZ: 'NZD', FJ: 'FJD', PG: 'PGK',
+};
+
+// Booking schreibt das Vereinigte Koenigreich im Pfad als "uk", der ISO-Code ist "gb".
+const HOTEL_LAND_ALIAS = { UK: 'GB' };
+
+// Gebiete ohne eigenen Booking-Markt und ohne eigene Waehrung: Dort ist die Sitzung des
+// Mutterlandes der richtige Inlandstest. Anlass war ein Hotel auf Réunion (RE) - franzoesisches
+// Ueberseedepartement, Euro, EU-Recht. Die passende Sitzung waere Frankreich gewesen; geprueft
+// haben wir Deutschland gegen dreizehn aussereuropaeische Laender und Frankreich nie.
+const HOTEL_LAND_MUTTERLAND = {
+  GP: 'FR', MQ: 'FR', GF: 'FR', RE: 'FR', YT: 'FR', PM: 'FR', BL: 'FR', MF: 'FR',
+  WF: 'FR', PF: 'FR', NC: 'FR', MC: 'FR', AD: 'ES', SM: 'IT', VA: 'IT', LI: 'CH',
+  PR: 'US', VI: 'US', GU: 'US', AS: 'US', MP: 'US',
+  AW: 'NL', CW: 'NL', SX: 'NL', BQ: 'NL',
+  GI: 'GB', IM: 'GB', JE: 'GB', GG: 'GB', BM: 'GB', VG: 'GB', KY: 'GB', TC: 'GB',
+  AI: 'GB', MS: 'GB', FK: 'GB', SH: 'GB',
+  FO: 'DK', GL: 'DK', SJ: 'NO', AX: 'FI',
+  NF: 'AU', CX: 'AU', CC: 'AU', CK: 'NZ', NU: 'NZ', TK: 'NZ',
 };
 
 // Anzeige-/Sprachkuerzel aus dem Booking.com-Link (z.B. "grand-fasano.de.html") -> Ausgangsland.
@@ -859,9 +910,14 @@ async function verifyTurnstile(token, remoteIp) {
 // Das Geraet MUSS in den Cache-Schluessel. Sonst liefert eine Mobil-Abfrage das gecachte
 // Desktop-Ergebnis zurueck - und genau der Unterschied, den wir messen wollen, waere
 // wegdefiniert, ohne dass es jemand merkt.
+// Hochzaehlen, wenn sich aendert WAS gemessen wird (nicht bei reinen Fehlerkorrekturen).
+// Sonst liefert der Cache nach einem solchen Deploy bis zu 24 Stunden lang Ergebnisse nach
+// altem Umfang zurueck - und man sucht den Fehler im neuen Code statt im Cache.
+// v2: dynamischer Platz fuer das Land der Unterkunft (19.09.2026).
+const CACHE_VERSION = 'v2';
 function cacheKeyFor(link, room, board, cancel, device) {
   return 'georates:' + crypto.createHash('sha256')
-    .update(`${link}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
+    .update(`${CACHE_VERSION}|${link}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
 }
 
 async function cacheGet(key) {
@@ -925,9 +981,9 @@ const LOG_COUNTRY_LABEL = { DE: 'Deutschland', CO: 'Kolumbien', AR: 'Argentinien
 // Die Waehrung gehoert dazu: Nur an ihr laesst sich erkennen, welche Werte WIR umgerechnet
 // haben (alles ausser EUR). Genau die stehen im Verdacht, Scheinfunde zu erzeugen, weil
 // Booking mit eigenem Kurs verkauft (siehe OFFEN.md, Punkt 1).
-function alleLaenderFuersLog(results) {
+function alleLaenderFuersLog(results, laender) {
   const nachLand = new Map(results.map((r) => [r.country, r]));
-  return ALL_COUNTRIES
+  return (laender || ALL_COUNTRIES)
     .filter((c) => nachLand.has(c))
     .map((c) => {
       const r = nachLand.get(c);
@@ -982,6 +1038,37 @@ function hotelLandAusLink(link) {
   } catch (e) {
     return ''; // kein gueltiger Link - lieber leer als geraten
   }
+}
+
+// Welche Landessitzung entspricht dem Standort des Hotels? Liefert '' , wenn wir es nicht
+// verlaesslich sagen koennen - dann laeuft die Suche wie bisher mit den 15 festen Laendern.
+function proxyLandFuerHotel(link) {
+  let land = hotelLandAusLink(link);
+  if (!land) return '';
+  land = HOTEL_LAND_ALIAS[land] || land;
+  land = HOTEL_LAND_MUTTERLAND[land] || land;
+  // Ohne bekannte Landeswaehrung keine Sitzung: siehe Kommentar an DEFAULT_CURRENCY_BY_COUNTRY.
+  return DEFAULT_CURRENCY_BY_COUNTRY[land] ? land : '';
+}
+
+// Die Laenderliste DIESER Suche: die 15 festen plus - falls noch nicht dabei - das Land der
+// Unterkunft selbst.
+//
+// Warum das noetig war: Die feste Liste ist eine WELTWEITE Stichprobe, sie passt sich dem Hotel
+// nie an. Fuer ein Hotel auf Réunion verglich sie die deutsche Sitzung gegen dreizehn
+// aussereuropaeische - und gegen keine einzige andere europaeische. Dabei lag genau dort der
+// Befund: Deutschland 125 EUR, alle dreizehn anderen 130,64 bis 131,25. Eine Kante von 4,8 %
+// zwischen EU-Sitzung und Rest der Welt, bei einem Hotel, das rechtlich in Frankreich liegt.
+// Welchen Preis die franzoesische Sitzung gezeigt haette, wissen wir nicht - wir haben nie gefragt.
+//
+// Kostet nur dann eine zusaetzliche Abfrage, wenn das Hotelland nicht ohnehin in der Liste steht.
+// Bei deutschen Hotels also gar nichts.
+function laenderFuerDieseSuche(link) {
+  const eigen = proxyLandFuerHotel(link);
+  if (!eigen || ALL_COUNTRIES.includes(eigen)) return ALL_COUNTRIES;
+  // Nach vorn, nicht ans Ende: Bei knappem Zeitbudget wird die Liste von hinten gekuerzt.
+  // Haengte man das Hotelland an, fiele ausgerechnet das interessanteste Land als Erstes weg.
+  return [ALL_COUNTRIES[0], eigen, ...ALL_COUNTRIES.slice(1)];
 }
 
 // Schreibt EINE Zeile pro Abfrage in die Google-Tabelle. Fehler werden verschluckt - das Logging
@@ -1467,13 +1554,19 @@ module.exports = async (req, res) => {
     const device = resolveDevice(req.body && req.body.device, false);
     const deviceLabel = deviceProfile(device).label;
 
+    // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft.
+    const laender = laenderFuerDieseSuche(link);
+    if (laender !== ALL_COUNTRIES) {
+      console.log(`[check-price] Hotelland ${laender[1]} zusaetzlich geprueft (${laender.length} Laender)`);
+    }
+
     // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien) PARALLEL, je 2 Versuche (Genauigkeit).
     const probeCountries = [baselineCountry];
     if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
 
     if (wantsStream) {
       openStream();
-      streamSend({ type: 'meta', baselineCountry, totalCountries: ALL_COUNTRIES.length });
+      streamSend({ type: 'meta', baselineCountry, totalCountries: laender.length });
     }
     // Im Stream-Modus geht jedes Land raus, SOBALD es fertig ist - nicht erst, wenn die ganze
     // Gruppe durch ist. Deshalb haengt der Versand am einzelnen Promise, nicht am Promise.all.
@@ -1532,7 +1625,7 @@ module.exports = async (req, res) => {
       // Die naechste Gruppe wird nur gestartet, wenn sie nach der bisher gemessenen Dauer
       // auch noch fertig wird. So laeuft die Funktion weder ins Vercel-Limit noch bricht sie
       // ab, obwohl noch Zeit fuer eine weitere Gruppe waere.
-      const remaining = ALL_COUNTRIES.filter((c) => !probeCountries.includes(c));
+      const remaining = laender.filter((c) => !probeCountries.includes(c));
       let batchEstimateMs = FIRST_BATCH_ESTIMATE_MS;
       for (let i = 0; i < remaining.length; i += EXPANSION_BATCH_SIZE) {
         const elapsed = Date.now() - startTime;
@@ -1584,7 +1677,7 @@ module.exports = async (req, res) => {
         relevant: summary.relevantSaving ? 'ja' : 'nein',
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
-        alleLaender: alleLaenderFuersLog(results),
+        alleLaender: alleLaenderFuersLog(results, laender),
         hotelLand: hotelLandAusLink(link),
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
@@ -1592,7 +1685,7 @@ module.exports = async (req, res) => {
         // wirklich kostet, ohne es jedes Mal aus dem Smartproxy-Dashboard zurueckzurechnen.
         // Das Geraet gehoert mit in die Zeile: Ohne diese Angabe liessen sich Desktop- und
         // Mobil-Messungen in der Tabelle spaeter nicht mehr auseinanderhalten.
-        status: (partial ? `ok (nur ${results.length} von ${ALL_COUNTRIES.length} Ländern – Zeitlimit)` : 'ok')
+        status: (partial ? `ok (nur ${results.length} von ${laender.length} Ländern – Zeitlimit)` : 'ok')
           + ` · ${deviceLabel}`
           + ` · ${Math.round(results.reduce((s, r) => s + (r.transferBytes || 0), 0) / (1024 * 1024))} MB`,
       });
