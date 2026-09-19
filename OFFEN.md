@@ -70,7 +70,18 @@ Peru gewinnt achtmal und liegt nie ueber 0,5 % — reines Rauschen. Aegypten fas
 Indien gewinnt nur, wenn es substanziell ist (kleinster Wert 3,7 %). Eine feste
 1-%-Schwelle fuer alle Laender passt dazu nicht.
 
-## 4. Waehrungshinweis in der Ergebnisanzeige
+## 4. Proxy-Abdeckung des dynamischen Landes ungeprueft
+
+Seit dem 19.09. laeuft zusaetzlich eine Sitzung im Land der Unterkunft (siehe Geklaert).
+Ungeprueft ist, fuer welche dieser Laender Smartproxy ueberhaupt Ausgangs-IPs hat. Fehlt eines,
+liefert die Abfrage schlicht keinen Preis - die Suche bleibt gueltig, kostet aber einen
+Versuch. Ablesbar wird das an Spalte Q: Steht dort das Hotelland mit `-`, obwohl andere
+Laender Preise haben, fehlt vermutlich der Proxy.
+
+Nach ein paar Tagen auszaehlen, welche Laender systematisch leer bleiben, und die entweder aus
+DEFAULT_CURRENCY_BY_COUNTRY streichen oder aufs Mutterland umbiegen.
+
+## 5. Waehrungshinweis in der Ergebnisanzeige
 
 Booking bietet an, in der Waehrung der Landessitzung abzurechnen. Gemessen am 18.09.:
 423,86 € gegen 77.720 JPY, letzteres zum Tageskurs rund sieben Euro teurer. Das frisst
@@ -81,7 +92,7 @@ In der Ergebnisanzeige steht bisher nur „Karte ohne Fremdwaehrungsgebuehr" —
 die Bankgebuehr, nicht auf Bookings Umrechnung. Ergaenzen: immer in der Waehrung der
 Unterkunft zahlen, nie in der angebotenen.
 
-## 5. „Best of" auf der Startseite
+## 6. „Best of" auf der Startseite
 
 Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 
@@ -93,12 +104,12 @@ Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 - Die Datenschutzerklaerung nennt als Zweck bisher nur Verbesserung und Auswertung.
   Veroeffentlichung ist ein weiterer Zweck und gehoert dort benannt.
 
-## 6. Mobiler Parser
+## 7. Mobiler Parser
 
 `MOBILE_READY = false`. Geraeteprofile fuer Android und iPhone sind vorhanden, das mobile
 Layout versteht der Parser aber nicht. Mobile Anfragen fallen auf Windows zurueck.
 
-## 7. Referrer-Experiment
+## 8. Referrer-Experiment
 
 Anregung von krabbs (Travel-Dealz): Zieht eine Weiterleitung von trivago oder Miles & More
 eine andere Rate als der Direkteinstieg? Waere mit dem vorhandenen Aufbau messbar, weil der
@@ -116,6 +127,12 @@ wuerde sonst die eigenen Messungen verzerren.
   18.09. herausgerechnet.
 - **Fremdsprachige Links** werden vor dem Abruf auf Deutsch gezwungen (18.09.).
 - **Kolumbien-Abbruch** ersatzlos entfernt; er hatte die eigene Statistik erzeugt.
+- **Das Land der Unterkunft wird mitgeprueft** (19.09.). Die feste Liste war eine weltweite
+  Stichprobe und passte sich dem Hotel nie an: Fuer ein Hotel auf Réunion verglich sie die
+  deutsche Sitzung gegen dreizehn aussereuropaeische - und gegen keine andere europaeische.
+  Dabei lag dort der Befund: DE 125 EUR, alle dreizehn anderen 130,64 bis 131,25. Jetzt kommt
+  pro Suche das Hotelland dazu (Spalte R), Uebersee-Gebiete ueber ihr Mutterland (RE → FR).
+  Steht es schon in der Liste, kostet es nichts.
 - **Das Log speichert alle geprueften Laender** (19.09.), nicht mehr nur das Siegerland.
   Spalte Q "Alle Laender", Format `DE:1292.06:EUR|JP:1264:JPY|US:-:USD` — feste Reihenfolge,
   `-` fuer "kein Preis". Kostet keinen zusaetzlichen Traffic, die Zahlen lagen ohnehin vor.
