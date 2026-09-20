@@ -914,10 +914,23 @@ async function verifyTurnstile(token, remoteIp) {
 // Sonst liefert der Cache nach einem solchen Deploy bis zu 24 Stunden lang Ergebnisse nach
 // altem Umfang zurueck - und man sucht den Fehler im neuen Code statt im Cache.
 // v2: dynamischer Platz fuer das Land der Unterkunft (19.09.2026).
-const CACHE_VERSION = 'v2';
+// v3: Schluessel wird aus dem BEREINIGTEN Link gebildet (20.09.2026).
+const CACHE_VERSION = 'v3';
+
+// Der Schluessel darf nicht aus dem rohen Link gebildet werden. Zwei Besucher, die dasselbe
+// Hotel zum selben Termin suchen, haben fast nie denselben Link: Booking haengt sid, aid, label
+// und diverse Trackingparameter an, und die unterscheiden sich pro Sitzung. Jeder dieser Links
+// war bisher ein eigener Cache-Eintrag - also ein Fehlschlag und rund 30 MB bezahlter Traffic
+// fuer eine Suche, deren Antwort schon dalag.
+//
+// Deshalb hier dieselbe Bereinigung wie fuers Log (linkFuersLog entfernt Sitzungs- und
+// Trackingparameter) plus die Sprachnormalisierung (normalisiereLinkFuerAbruf zwingt auf .de.html),
+// denn ".en-gb.html" und ".de.html" desselben Hotels liefern dieselben Preise.
 function cacheKeyFor(link, room, board, cancel, device) {
+  let basis = link;
+  try { basis = linkFuersLog(normalisiereLinkFuerAbruf(link)) || link; } catch (e) { /* Rohlink als Rueckfall */ }
   return 'georates:' + crypto.createHash('sha256')
-    .update(`${CACHE_VERSION}|${link}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
+    .update(`${CACHE_VERSION}|${basis}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
 }
 
 async function cacheGet(key) {
@@ -951,6 +964,12 @@ async function cacheSet(key, value) {
 // nicht gebremst - wie beim Cache ist das ein Optimierungs-, kein Sicherheitsfundament.
 const ROOMS_RATE_LIMIT = 20;            // Abrufe ...
 const ROOMS_RATE_WINDOW_SECONDS = 3600; // ... pro IP und Stunde
+// Dieselbe Bremse gilt seit dem 20.09. auch fuer den Preis-Check. Turnstile haelt Skripte ab,
+// aber es BEGRENZT nichts: Wer den Bot-Check besteht, kann beliebig oft suchen, und jede Suche
+// kostet rund 30 MB bezahlten Residential-Traffic. Vorher entschied allein das Verhalten der
+// Besucher, wie hoch die Rechnung am Monatsende wird.
+const PRICE_RATE_LIMIT = 12;            // Suchen ...
+const PRICE_RATE_WINDOW_SECONDS = 3600; // ... pro IP und Stunde
 async function rateLimitUeberschritten(bucket, ip, limit, windowSeconds) {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -965,6 +984,62 @@ async function rateLimitUeberschritten(bucket, ip, limit, windowSeconds) {
     if (count === 1) await fetch(`${url}/expire/${key}/${windowSeconds}`, { headers: auth });
     return count > limit;
   } catch (e) { return false; }
+}
+
+// ---- Tagesdeckel fuer den Proxy-Verbrauch ------------------------------------------------
+// Die Bremse pro IP faengt den Einzelnen ab, der den Endpunkt in einer Schleife aufruft. Sie
+// hilft nicht, wenn die Anfragen aus vielen verschiedenen IPs kommen - und genau dann wird es
+// teuer, weil jede Suche rund 30 MB bezahlten Traffic zieht.
+//
+// Deshalb zusaetzlich eine harte Obergrenze pro Kalendertag. Ist sie erreicht, antwortet die
+// Seite ehrlich mit "heute ausgelastet", statt weiterzulaufen und die Rechnung zu treiben. Eine
+// abgelehnte Suche aergert einen Besucher; eine vierstellige Proxy-Rechnung beendet das Projekt.
+//
+// Gezaehlt wird ERST nach dem Cache-Treffer und erst kurz bevor wirklich Proxies anlaufen -
+// eine aus dem Cache beantwortete Suche kostet nichts und darf das Budget nicht belasten.
+// Der Wert laesst sich ueber die Umgebungsvariable anheben, ohne den Code anzufassen.
+const TAGESBUDGET_SUCHEN = Number(process.env.TAGESBUDGET_SUCHEN || 300);
+async function tagesbudgetAufgebraucht() {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  // Ohne Upstash keine Bremse. Bewusst so: lieber laufen lassen als bei einer Stoerung des
+  // Zaehlers faelschlich jede Suche abweisen. Das Risiko traegt der Betreiber, nicht der Nutzer.
+  if (!url || !token) return false;
+  const tag = new Date().toISOString().slice(0, 10); // UTC-Tag, reicht fuer einen groben Deckel
+  const key = `budget:suchen:${tag}`;
+  try {
+    const auth = { Authorization: `Bearer ${token}` };
+    const res = await fetch(`${url}/incr/${key}`, { headers: auth });
+    const json = await res.json();
+    const count = Number(json && json.result);
+    if (!Number.isFinite(count)) return false;
+    // Nur beim ersten Zaehler des Tages eine Lebensdauer setzen, sonst haeuften sich die
+    // Schluessel vergangener Tage unbegrenzt an.
+    if (count === 1) await fetch(`${url}/expire/${key}/172800`, { headers: auth });
+    if (count > TAGESBUDGET_SUCHEN) {
+      console.log(`[budget] Tagesdeckel erreicht: ${count} > ${TAGESBUDGET_SUCHEN} (${tag})`);
+      return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+
+// ---- Messwerkzeuge absichern --------------------------------------------------------------
+// debug, debugLines, noScripts und die freie Geraetewahl sind Diagnosewerkzeuge: Sie kosten
+// zusaetzlichen Proxy-Traffic und geben Ausschnitte des geladenen Seitentexts zurueck. Bisher
+// konnte sie jeder setzen, der die Adresse des Endpunkts kennt - und die steht im Frontend.
+//
+// Sie bleiben erreichbar, aber nur mit dem passenden Header. Ohne gesetztes DEBUG_SECRET sind
+// sie vollstaendig aus; das ist der richtige Ruhezustand, wenn niemand bewusst etwas messen will.
+// Das Frontend schickt keinen dieser Schalter, der normale Betrieb merkt davon also nichts.
+//
+// Kein Konstantzeit-Vergleich: Das hier schuetzt Traffic, keine Nutzerdaten. Wer das Secret
+// erraet, sieht Seitentext von Booking.com - aerglich, aber kein Datenleck.
+function debugErlaubt(req) {
+  const secret = process.env.DEBUG_SECRET;
+  if (!secret) return false;
+  const mitgeschickt = req.headers && req.headers['x-georates-debug'];
+  return typeof mitgeschickt === 'string' && mitgeschickt === secret;
 }
 
 // ---- Abfrage-Log (optional, an eine Google-Tabelle via Apps-Script-Webhook) ----------------
@@ -1393,13 +1468,16 @@ module.exports = async (req, res) => {
       //    Booking die Tarifzeilen mit Verpflegung/Storno. Ein Datacenter-Direktabruf bekommt zwar
       //    die Zimmernamen, aber keine Optionen - daher hier Proxy zuerst.
       const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
+      // Alle folgenden Schalter sind Messwerkzeuge und nur mit gueltigem Debug-Header aktiv
+      // (siehe debugErlaubt). Ohne ihn verhaelt sich der Endpunkt wie fuer normale Besucher.
+      const darfMessen = debugErlaubt(req);
       // Messmodus: Mit noScripts:true laesst sich derselbe Abruf einmal mit und einmal ohne
       // Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu vergleichen.
-      const blockScripts = !!(req.body && req.body.noScripts);
+      const blockScripts = darfMessen && !!(req.body && req.body.noScripts);
       // Geraeteprofil: windows (Default), mac, android, iphone. Hier durchgereicht, damit sich
       // die Zimmerliste eines Geraets einzeln pruefen laesst - das ist der billigste Weg zu
       // sehen, ob der Parser die mobile Seitenstruktur ueberhaupt versteht.
-      const device = resolveDevice(req.body && req.body.device, !!(req.body && req.body.debug));
+      const device = resolveDevice(darfMessen ? (req.body && req.body.device) : null, darfMessen && !!(req.body && req.body.debug));
       for (let a = 1; a <= 2 && !withOpts; a++) {
         const r = await attemptFetch(abrufLink, srv, proxyAuth, blockScripts, device);
         lastR = r;
@@ -1417,12 +1495,12 @@ module.exports = async (req, res) => {
       const rooms = withOpts || namesOnly;
       if (!rooms) {
         const failPayload = { success: false, reason: 'rooms_not_loaded' };
-        if (req.body && req.body.debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
+        if (darfMessen && req.body && req.body.debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
         res.status(200).json(failPayload);
         return;
       }
       const payload = { success: true, rooms, baselineCountry };
-      if (req.body && req.body.debug && lastR) {
+      if (darfMessen && req.body && req.body.debug && lastR) {
         payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk, transferKB: Math.round((lastR.transferBytes || 0) / 1024) };
         // Diagnose: die echte Preis-Erkennung gegen den vom Server geladenen Seitentext testen.
         try {
@@ -1439,7 +1517,7 @@ module.exports = async (req, res) => {
           const fenster = Math.min(Math.max(parseInt(req.body.debugLines, 10) || 22, 5), 160);
           payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + fenster) : [] };
           // Mit debug:'price' den ECHTEN Preis-Pfad fuers Ausgangsland durchlaufen lassen.
-          if (req.body.debug === 'price' && rn) {
+          if (req.body.debug === 'price' && rn) { // darfMessen gilt bereits durch den umschliessenden Block
             // Ohne zweiten Browserstart: die Preis-Kette auf dem BEREITS geladenen Seitentext pruefen.
             const rr = await getLiveRates();
             const useRoom = req.body.room || rn;
@@ -1466,6 +1544,13 @@ module.exports = async (req, res) => {
   const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
   if (!humanOk) {
     respond(403, { success: false, reason: 'bot_check_failed' });
+    return;
+  }
+
+  // Bot-Check bestanden heisst nicht "beliebig oft". Die Bremse pro IP greift vor allem gegen
+  // die Schleife eines Einzelnen; sie liegt hoch genug, dass normales Ausprobieren nicht anstoesst.
+  if (await rateLimitUeberschritten('preis', remoteIp, PRICE_RATE_LIMIT, PRICE_RATE_WINDOW_SECONDS)) {
+    respond(429, { success: false, reason: 'rate_limited' });
     return;
   }
 
@@ -1506,7 +1591,12 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', resolveDevice(req.body && req.body.device, false));
+  // Auch hier ist die freie Geraetewahl ein Messwerkzeug: Sie veraendert das Ergebnis UND den
+  // Cache-Schluessel, ein Fremder koennte damit am Cache vorbei immer neue Abrufe ausloesen.
+  // Ohne Debug-Header gilt deshalb das Standardprofil. Einmal berechnet und unten
+  // weiterverwendet, damit Schluessel und tatsaechlicher Lauf nicht auseinanderlaufen koennen.
+  const geraet = resolveDevice(debugErlaubt(req) ? (req.body && req.body.device) : null, false);
+  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', geraet);
   const cached = await cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
@@ -1518,6 +1608,14 @@ module.exports = async (req, res) => {
       (cached.results || []).forEach((r) => streamSend({ type: 'country', result: r }));
     }
     respond(200, { ...cached, fromCache: true });
+    return;
+  }
+
+  // Ab hier laufen gleich echte Proxy-Abrufe. Erst jetzt zaehlt die Suche aufs Tagesbudget -
+  // alles davor (Cache-Treffer, ungueltiger Link, fehlendes Zimmer) hat nichts gekostet.
+  if (await tagesbudgetAufgebraucht()) {
+    await logAttempt('Tagesbudget aufgebraucht');
+    respond(200, { success: false, reason: 'daily_budget_reached' });
     return;
   }
 
@@ -1551,7 +1649,7 @@ module.exports = async (req, res) => {
 
     // Geraeteprofil gilt fuer ALLE Laender derselben Abfrage. Sonst waere der Vergleich wertlos:
     // Wir wollen den Laendereffekt messen, nicht Land gegen Geraet.
-    const device = resolveDevice(req.body && req.body.device, false);
+    const device = geraet; // oben bereits aufgeloest, siehe Kommentar beim Cache-Schluessel
     const deviceLabel = deviceProfile(device).label;
 
     // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft.
