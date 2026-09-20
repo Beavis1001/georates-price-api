@@ -2,1389 +2,78 @@
 // Booking.com-Zimmers ueber Proxy-Sessions aus mehreren Laendern (Smartproxy) und meldet
 // zurueck, ob ein Laenderwechsel (VPN) eine relevante Ersparnis bringt.
 //
+// Die Logik liegt in lib/: config (Konstanten, Laender, Links), parser (Text -> Preis),
+// browser (Chromium, Proxy, Seite laden), store (Upstash, Log, Best-of), http (CORS, Turnstile).
+// Diese Datei ist nur noch der Ablauf einer Anfrage.
+//
 // Kostenschutz (echter Proxy-Traffic kostet Geld, daher mehrfach abgesichert):
-//   1. Cloudflare Turnstile Bot-Check vor jeder Preis-Anfrage (siehe verifyTurnstile).
-//   2. Ergebnis-Cache (Upstash Redis, 24h) - identische Anfragen loesen keinen neuen
-//      Proxy-Traffic aus.
-//   3. Bilder/Fonts/Stylesheets werden beim Laden geblockt (nur Text noetig).
-//   3a. Der "rooms"-Modus laeuft ohne Turnstile (leichter Abruf), dafuer mit einer Zaehlbremse
-//      pro IP - sonst waere er der billigste Weg, Proxy-Traffic zu verbrennen.
-//   4. Erst DE+CO parallel als schnelle Probe, danach die uebrigen Laender in Gruppen.
+//   1. Cloudflare Turnstile Bot-Check vor JEDER Anfrage, die Proxy-Traffic ausloest - seit dem
+//      Audit auch im "rooms"-Modus (siehe verifyTurnstile).
+//   2. Zaehlbremse pro IP fuer beide Modi und ein harter Tagesdeckel in Anfragen und Megabyte
+//      (lib/store.js). Turnstile beweist einen Menschen, nicht dessen Zurueckhaltung.
+//   3. Ergebnis-Cache (Upstash Redis, 24h) mit bereinigtem Link - identische Suchen loesen
+//      keinen neuen Proxy-Traffic aus, auch wenn Booking eine neue Sitzungs-ID in den Link schreibt.
+//   4. Bilder/Fonts/Stylesheets werden beim Laden geblockt (nur Text noetig).
+//   5. Erst DE+CO parallel als schnelle Probe, danach die uebrigen Laender in Gruppen.
 //      Eine weitere Laendergruppe wird nur gestartet, wenn sie nach der bisher gemessenen
 //      Gruppendauer noch vor dem Vercel-Zeitlimit fertig wird. Reicht die Zeit nicht,
 //      liefert die Antwort die bis dahin geprueften Laender plus partial:true zurueck.
+//   6. Debug-Schalter nur mit Geheimwort im Header (DEBUG_SECRET).
 
-const crypto = require('crypto');
-const chromium = require('@sparticuz/chromium-min');
-const puppeteer = require('puppeteer-core');
+const cfg = require('../lib/config');
+const parser = require('../lib/parser');
+const browser = require('../lib/browser');
+const store = require('../lib/store');
+const { verifyTurnstile, setCors, clientIp, debugErlaubt } = require('../lib/http');
 
-// Vollstaendiges Chromium-Paket (inkl. Shared Libraries wie libnss3.so) wird zur Laufzeit
-// aus dem passenden GitHub-Release geladen. So entfaellt das fragile Mitbundeln der Libs
-// durch Vercel, das zuvor den Fehler "libnss3.so: cannot open shared object file" ausloeste.
-const CHROMIUM_PACK_URL =
-  'https://github.com/Sparticuz/chromium/releases/download/v148.0.0/chromium-v148.0.0-pack.x64.tar';
+const {
+  ALL_COUNTRIES, CHEAP_PROBE_COUNTRY, MAX_ATTEMPTS, EXPANSION_ATTEMPTS, EXPANSION_BATCH_SIZE,
+  HARD_DEADLINE_MS, FIRST_BATCH_ESTIMATE_MS, BATCH_ESTIMATE_SAFETY, MIN_LOADED_LINES,
+  DEFAULT_CURRENCY_BY_COUNTRY, LOG_BOARD_LABEL, LOG_CANCEL_LABEL, LOG_COUNTRY_LABEL,
+  MAX_LINK_LEN, MAX_ROOM_LEN, BOARD_VALUES, CANCEL_VALUES,
+} = cfg;
 
-// ---- Konfiguration -----------------------------------------------------------------------
+const BOOKING_LINK_RE = /^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i;
 
-// Alle Laender, ueber die wir per Proxy einen Preis abfragen koennen. Reihenfolge = Prioritaet
-// bei der Erweiterung: erfahrungsgemaess guenstige Laender (schwache Waehrung/hohe Inflation)
-// zuerst, damit ein evtl. durch das Zeitlimit gekuerztes Ergebnis trotzdem die relevanten
-// Kandidaten enthaelt. Teure Maerkte (USA, Japan) ganz am Ende.
-// Hinweis: Tuerkei (TR) bewusst NICHT enthalten - von dort sind aktuell keine internationalen
-// Buchungen moeglich, daher waere eine Abfrage nur verschwendeter Proxy-Traffic.
-const ALL_COUNTRIES = ['DE', 'CO', 'AR', 'EG', 'IN', 'VN', 'ID', 'PK', 'LK', 'PE', 'MX', 'PH', 'TH', 'US', 'JP'];
-// "Guenstig-Kandidat" fuer die schnelle Probe (neben dem Ausgangsland).
-const CHEAP_PROBE_COUNTRY = 'CO';
-// Ausgangsland (Referenzpreis), falls es sich nicht aus dem Link ableiten laesst.
-const DEFAULT_BASELINE_COUNTRY = 'DE';
-// Ab dieser Ersparnis empfehlen wir aktiv einen Laenderwechsel per VPN.
-const PROBE_CONFIDENCE_THRESHOLD_PCT = 10.0;
-// Unterhalb dieser Schwelle ist ein Preisunterschied blosses Rauschen (Wechselkurs-Rundung,
-// Nachkommastellen). Solche Treffer werden NICHT als "guenstigeres Land" verkauft - weder im
-// Ergebnis noch im Deal-Log. Sonst wirkt das Tool, als wolle es um jeden Preis etwas finden.
-const RELEVANT_SAVINGS_PCT = 1.0;
-// Ausgangsland + Kolumbien: 2 Versuche (der Referenzpreis MUSS verlaesslich sein).
-// Die zusaetzlichen Laender bekommen nur 1 Versuch (Tempo; ein verpasstes Land ist unkritisch).
-const MAX_ATTEMPTS = 2;
-const EXPANSION_ATTEMPTS = 1;
-// Wie viele Laender in der Erweiterungsphase gleichzeitig geprueft werden. Seit der Umstellung
-// auf 2 GB (vercel.json) ist genug Arbeitsspeicher fuer mehrere Chromium-Instanzen da; das
-// halbiert die Laufzeit eines vollstaendigen Scans. Hoeher als 4 bringt wenig: der Hobby-Plan
-// hat nur 1 vCPU, ab da warten die Instanzen nur noch aufeinander.
-const EXPANSION_BATCH_SIZE = 4;
-const MIN_LOADED_LINES = 300;
-// Obergrenze fuer die Laenge eines Zimmernamens. Das ist eine Plausibilitaetsbremse gegen
-// versehentlich mitgelesene Textabsaetze - KEIN inhaltliches Kriterium. Frueher standen hier
-// 55 bis 70 Zeichen, und das hat echte Zimmer verschluckt: Booking haengt Unterscheidungen
-// hinten an ("... - kleinere Villa"), und solche Namen kommen leicht auf ueber 70 Zeichen.
-// Ausgerechnet die guenstigste Kategorie eines Hotels fiel dadurch aus der Auswahl.
-const ROOM_NAME_MAX_LEN = 140;
-// Zeitsteuerung der Erweiterungsphase: vorausschauend statt mit starrem Budget. Wir messen,
-// wie lange die letzte Gruppe wirklich gedauert hat, und starten die naechste nur, wenn sie
-// nach dieser Erfahrung noch vor HARD_DEADLINE_MS fertig wird. Das nutzt das Zeitfenster
-// besser aus als eine feste Schranke und kann das Limit nicht ueberfahren.
-//
-// Mit Vercel "Fluid Compute" (im Projekt aktiv) erlaubt auch der kostenlose Hobby-Plan bis zu
-// 300s pro Funktion. Wir nehmen NICHT das Maximum: 15 Laender brauchen erfahrungsgemaess
-// ~100-120s, und jede Sekunde Laufzeit ist bezahlter Proxy-Traffic. 180s lassen genug Luft,
-// begrenzen aber einen entgleisten Lauf.
-// WICHTIG: Dieser Wert muss zu maxDuration in vercel.json passen.
-const FUNCTION_LIMIT_MS = 180000;         // Vercel-Limit (siehe vercel.json)
-const RESPONSE_RESERVE_MS = 10000;        // Puffer fuer Zusammenfassung, Cache-Write, Logging, Antwort
-const HARD_DEADLINE_MS = FUNCTION_LIMIT_MS - RESPONSE_RESERVE_MS;
-// Schaetzung fuer die erste Gruppe (noch kein Messwert vorhanden) - bewusst pessimistisch.
-const FIRST_BATCH_ESTIMATE_MS = 14000;
-// Sicherheitsaufschlag auf die gemessene Gruppendauer: die naechste Gruppe kann langsamer sein.
-const BATCH_ESTIMATE_SAFETY = 1.25;
-const CACHE_TTL_SECONDS = 24 * 3600;
-
-// Landeswaehrung als RUECKFALL - die Waehrung wird zuerst aus der Preiszeile der Seite gelesen.
-// Gebraucht wird der Eintrag vor allem bei mehrdeutigen Zeichen: Ein nacktes "$" steht in
-// Argentinien, Mexiko, Chile und Kolumbien fuer die Landeswaehrung, nicht fuer US-Dollar.
-//
-// Die Tabelle geht ueber die 15 festen Laender hinaus, seit es den dynamischen Platz fuer das
-// Land der Unterkunft gibt (siehe laenderFuerDieseSuche). Sie ist zugleich die Freigabeliste:
-// Nur fuer ein Land, dessen Waehrung wir kennen, starten wir eine zusaetzliche Sitzung. Lieber
-// ein Land weniger pruefen als einen Betrag in einer geratenen Waehrung in die Tabelle schreiben.
-const DEFAULT_CURRENCY_BY_COUNTRY = {
-  // Die 15 festen Laender
-  DE: 'EUR', US: 'USD', CO: 'COP', TH: 'THB', IN: 'INR', EG: 'EGP', AR: 'ARS',
-  LK: 'LKR', VN: 'VND', ID: 'IDR', PK: 'PKR', PE: 'PEN',
-  MX: 'MXN', PH: 'PHP', JP: 'JPY',
-  // Europa
-  FR: 'EUR', IT: 'EUR', ES: 'EUR', PT: 'EUR', NL: 'EUR', BE: 'EUR', AT: 'EUR', IE: 'EUR',
-  GR: 'EUR', FI: 'EUR', EE: 'EUR', LV: 'EUR', LT: 'EUR', SK: 'EUR', SI: 'EUR', LU: 'EUR',
-  MT: 'EUR', CY: 'EUR', HR: 'EUR', ME: 'EUR', XK: 'EUR',
-  GB: 'GBP', CH: 'CHF', SE: 'SEK', NO: 'NOK', DK: 'DKK', PL: 'PLN', CZ: 'CZK', HU: 'HUF',
-  RO: 'RON', BG: 'BGN', RS: 'RSD', UA: 'UAH', IS: 'ISK', AL: 'ALL', BA: 'BAM', MK: 'MKD',
-  MD: 'MDL', GE: 'GEL', AM: 'AMD', AZ: 'AZN',
-  // Tuerkei: bei den festen Laendern bewusst ausgelassen (von dort sind keine internationalen
-  // Buchungen moeglich). Fuer ein TUERKISCHES Hotel ist die tuerkische Sitzung aber genau der
-  // Inlandsfall, um den es hier geht - deshalb auf dem dynamischen Platz erlaubt.
-  TR: 'TRY',
-  // Amerika
-  CA: 'CAD', BR: 'BRL', CL: 'CLP', UY: 'UYU', PY: 'PYG', BO: 'BOB', EC: 'USD', PA: 'USD',
-  CR: 'CRC', GT: 'GTQ', DO: 'DOP', JM: 'JMD', TT: 'TTD', BS: 'BSD', BB: 'BBD',
-  // Asien
-  CN: 'CNY', HK: 'HKD', TW: 'TWD', KR: 'KRW', SG: 'SGD', MY: 'MYR', BD: 'BDT', NP: 'NPR',
-  KH: 'KHR', LA: 'LAK', MN: 'MNT', KZ: 'KZT', UZ: 'UZS', MV: 'MVR', BN: 'BND',
-  // Naher Osten
-  AE: 'AED', SA: 'SAR', QA: 'QAR', KW: 'KWD', BH: 'BHD', OM: 'OMR', JO: 'JOD', IL: 'ILS',
-  // Afrika
-  MA: 'MAD', TN: 'TND', ZA: 'ZAR', KE: 'KES', TZ: 'TZS', UG: 'UGX', NG: 'NGN', GH: 'GHS',
-  ET: 'ETB', MU: 'MUR', SC: 'SCR', NA: 'NAD', BW: 'BWP', ZM: 'ZMW',
-  // Ozeanien
-  AU: 'AUD', NZ: 'NZD', FJ: 'FJD', PG: 'PGK',
-};
-
-// Booking schreibt das Vereinigte Koenigreich im Pfad als "uk", der ISO-Code ist "gb".
-const HOTEL_LAND_ALIAS = { UK: 'GB' };
-
-// Gebiete ohne eigenen Booking-Markt und ohne eigene Waehrung: Dort ist die Sitzung des
-// Mutterlandes der richtige Inlandstest. Anlass war ein Hotel auf Réunion (RE) - franzoesisches
-// Ueberseedepartement, Euro, EU-Recht. Die passende Sitzung waere Frankreich gewesen; geprueft
-// haben wir Deutschland gegen dreizehn aussereuropaeische Laender und Frankreich nie.
-const HOTEL_LAND_MUTTERLAND = {
-  GP: 'FR', MQ: 'FR', GF: 'FR', RE: 'FR', YT: 'FR', PM: 'FR', BL: 'FR', MF: 'FR',
-  WF: 'FR', PF: 'FR', NC: 'FR', MC: 'FR', AD: 'ES', SM: 'IT', VA: 'IT', LI: 'CH',
-  PR: 'US', VI: 'US', GU: 'US', AS: 'US', MP: 'US',
-  AW: 'NL', CW: 'NL', SX: 'NL', BQ: 'NL',
-  GI: 'GB', IM: 'GB', JE: 'GB', GG: 'GB', BM: 'GB', VG: 'GB', KY: 'GB', TC: 'GB',
-  AI: 'GB', MS: 'GB', FK: 'GB', SH: 'GB',
-  FO: 'DK', GL: 'DK', SJ: 'NO', AX: 'FI',
-  NF: 'AU', CX: 'AU', CC: 'AU', CK: 'NZ', NU: 'NZ', TK: 'NZ',
-};
-
-// Anzeige-/Sprachkuerzel aus dem Booking.com-Link (z.B. "grand-fasano.de.html") -> Ausgangsland.
-// Nur Laender, fuer die wir auch einen Proxy haben, koennen als Baseline dienen; alles andere
-// faellt auf DEFAULT_BASELINE_COUNTRY zurueck.
-const LANG_TO_BASELINE_COUNTRY = {
-  de: 'DE', 'de-de': 'DE', 'de-at': 'DE', 'de-ch': 'DE',
-  'en-us': 'US',
-  'es-co': 'CO', 'es-ar': 'AR', 'es-mx': 'MX', 'es-pe': 'PE',
-  th: 'TH', hi: 'IN', ar: 'EG',
-  vi: 'VN', id: 'ID', ja: 'JP',
-};
-
-// Leitet das Ausgangsland aus dem Anzeige-/Sprachkuerzel des Booking-Links ab. Booking-Hotel-
-// URLs enden auf ".<lang>.html" (z.B. ".de.html", ".en-gb.html"). Nicht zuordenbar -> DE.
-function detectBaselineCountry(link) {
-  try {
-    const path = new URL(link).pathname;
-    const m = path.match(/\.([a-z]{2}(?:-[a-z]{2})?)\.html$/i);
-    if (m) {
-      const lang = m[1].toLowerCase();
-      if (LANG_TO_BASELINE_COUNTRY[lang]) return LANG_TO_BASELINE_COUNTRY[lang];
-      const two = lang.slice(0, 2).toUpperCase();
-      if (ALL_COUNTRIES.includes(two)) return two;
-    }
-  } catch (e) { /* ungueltiger Link -> Default */ }
-  return DEFAULT_BASELINE_COUNTRY;
-}
-
-// ---- Link fuer den Abruf auf Deutsch zwingen ---------------------------------------------
-// Der gesamte Parser ist deutschsprachig: Er sucht nach "Steuern und Gebuehren", "kostenlos
-// stornierbar", "Fruehstueck". Kommt die Seite in einer anderen Sprache zurueck, trifft davon
-// nichts und die Anfrage endet mit "kein Preis gefunden" - ohne dass der Nutzer erfaehrt,
-// warum. Genau das ist am 17.09. zwei Besuchern aus Oesterreich passiert, deren Link die
-// englische Variante war (".html" ohne Sprachkuerzel plus lang=en-us).
-//
-// Accept-Language allein reicht nicht: Der lang-Parameter in der URL sticht den Header aus.
-// Deshalb wird hier beides erzwungen - Pfadendung und Parameter.
-//
-// WICHTIG: Diese Funktion darf erst NACH detectBaselineCountry() angewendet werden. Die
-// Sprachendung des Original-Links ist die einzige Information darueber, aus welchem Land der
-// Nutzer kommt; wer sie vorher ueberschreibt, macht aus jedem Besucher einen Deutschen.
-// Ins Log gehoert ebenfalls der Originallink, sonst faellt nie wieder auf, dass jemand mit
-// einem fremdsprachigen Link kam.
-const WAEHRUNGS_PARAMS = ['selected_currency', 'cur_currency', 'currency'];
-function normalisiereLinkFuerAbruf(link) {
-  try {
-    const u = new URL(link);
-    // ".en-us.html" / ".es.html" -> ".de.html"; Links ohne Sprachkuerzel bleiben unangetastet,
-    // die liefert Booking schon anhand des Accept-Language-Headers deutsch aus.
-    u.pathname = u.pathname.replace(/\.([a-z]{2}(?:-[a-z]{2})?)\.html$/i, (treffer, lang) =>
-      /^de(-[a-z]{2})?$/i.test(lang) ? treffer : '.de.html');
-    u.searchParams.set('lang', 'de');
-    // Eine im Link festgenagelte Waehrung wuerde jede Laender-Sitzung dieselbe Waehrung zeigen
-    // lassen - dann ist die Spalte "Preis vor Ort" wertlos und der Vergleich misst nichts mehr.
-    for (const p of WAEHRUNGS_PARAMS) u.searchParams.delete(p);
-    return u.toString();
-  } catch (e) { return link; }
-}
-
-// ---- Proxy-Traffic sparen -----------------------------------------------------------------
-// Jedes geladene Byte kostet Guthaben. Fuer die Preiserkennung brauchen wir nur das HTML der
-// Hotelseite und Bookings eigene Skripte - Bilder, Schriften, Videos, Tracker und alle
-// Drittanbieter-Domains werden hart geblockt.
-const BLOCKED_RESOURCE_TYPES = new Set([
-  'image', 'media', 'font', 'stylesheet', 'other',
-  'texttrack', 'websocket', 'manifest', 'eventsource', 'ping', 'cspviolationreport',
-]);
-// Schalter fuer den Preis-Pfad: Bookings eigene JavaScript-Bundles mitblocken. Skripte sind
-// der Grossteil der uebertragenen Bytes, das waere also der groesste Hebel beim Proxy-Verbrauch.
-// Gemessen am 17.09.: Ohne Bookings JS liefert die Seite 0 Zimmer und praktisch keinen Text -
-// die Zimmertabelle wird komplett per JavaScript aufgebaut. Der Schalter bleibt deshalb aus.
-// Ueber den "rooms"-Modus laesst er sich mit noScripts:true jederzeit nachmessen.
-const BLOCK_BOOKING_SCRIPTS = false;
-// Nur Bookings eigene Domains duerfen laden (bstatic.com ist Bookings Asset-CDN).
-const ALLOWED_HOST_RE = /(^|\.)booking\.com$|(^|\.)bstatic\.com$/i;
-// Bekannte Tracker/Werbenetze - sicherheitshalber explizit, falls sie unter booking.com laufen.
-const TRACKER_HOST_RE = /google-analytics|googletagmanager|doubleclick|googlesyndication|googleadservices|gstatic|connect\.facebook|facebook\.net|criteo|hotjar|segment\.(io|com)|newrelic|nr-data|sentry|adsrvr|taboola|outbrain|bat\.bing|clarity\.ms|amplitude|mixpanel|optimizely|quantserve|scorecardresearch|adnxs|pubmatic|rubiconproject|casalemedia|tiktok|snapchat|pinterest|twitter|cloudflareinsights|onetrust|cookielaw/i;
-
-// ---- Live-Wechselkurse (tagesaktuell, EUR-Basis, kostenlos ohne API-Key) -----------------
-// Wichtig: Der Vergleich ist nur so verlaesslich wie der Wechselkurs. Deshalb werden zwei
-// unabhaengige Live-Quellen versucht. Liefert KEINE Quelle aktuelle Kurse, wird KEIN Preis
-// umgerechnet (getLiveRates gibt null zurueck) und die Anfrage bricht sauber ab, statt mit
-// veralteten/falschen Kursen zu rechnen.
-async function fetchJson(url, timeoutMs) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return await res.json();
-  } finally {
-    clearTimeout(t);
+// Eingaben auf das Erwartete begrenzen. Alles ist ein String aus dem Browser; Laenge und
+// Wertebereich werden hier festgezogen, damit weder Cache-Schluessel noch Log noch Parser mit
+// beliebig grossen oder fremden Werten arbeiten muessen.
+function eingabenPruefen(body) {
+  const b = body || {};
+  const link = String(b.link || '').trim();
+  const room = String(b.room || '').trim();
+  const board = String(b.board || '').trim();
+  const cancel = String(b.cancel || '').trim();
+  if (!link || link.length > MAX_LINK_LEN || !BOOKING_LINK_RE.test(link)) return { fehler: 'invalid_link' };
+  if (room.length > MAX_ROOM_LEN) return { fehler: 'invalid_room' };
+  if (!BOARD_VALUES.includes(board)) return { fehler: 'invalid_board' };
+  if (!CANCEL_VALUES.includes(cancel)) return { fehler: 'invalid_cancel' };
+  // Laenderauswahl: nur Kuerzel, nur bekannte Laender, hoechstens die feste Liste plus Hotelland.
+  let countries = null;
+  if (Array.isArray(b.countries)) {
+    countries = b.countries.map((c) => String(c || '').toUpperCase().slice(0, 2)).filter((c) => /^[A-Z]{2}$/.test(c)).slice(0, 20);
   }
+  return { link, room, board, cancel, countries };
 }
 
-async function getLiveRates() {
-  // Quelle 1: open.er-api.com (deckt alle hier genutzten Waehrungen ab).
-  try {
-    const json = await fetchJson('https://open.er-api.com/v6/latest/EUR', 6000);
-    if (json && json.result === 'success' && json.rates) {
-      const inverse = { EUR: 1.0 };
-      for (const [cur, rate] of Object.entries(json.rates)) {
-        if (rate) inverse[cur] = 1 / rate; // EUR-Gegenwert von 1 Einheit `cur`
-      }
-      return inverse;
-    }
-  } catch (e) { /* naechste Quelle versuchen */ }
-
-  // Quelle 2: fawazahmed0 currency-api (freie ECB-/Marktdaten, ebenfalls alle Waehrungen).
-  try {
-    const json = await fetchJson('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.json', 6000);
-    if (json && json.eur) {
-      const inverse = { EUR: 1.0 };
-      for (const [cur, rate] of Object.entries(json.eur)) {
-        if (rate) inverse[cur.toUpperCase()] = 1 / rate;
-      }
-      return inverse;
-    }
-  } catch (e) { /* beide Quellen fehlgeschlagen */ }
-
-  return null; // keine verlaesslichen Live-Kurse -> Aufrufer bricht ab
+// Fehlermeldungen an den Client sind generisch. Die Details (Stack, Proxy-Antworten) gehoeren
+// ins Vercel-Log, nicht in die Antwort - dort kann sie jeder lesen, der den Endpunkt aufruft.
+function fehlerAntwort(err) {
+  console.error('[check-price] Fehler:', (err && err.stack) || err);
+  return { success: false, reason: 'error', message: 'Der Check konnte gerade nicht ausgeführt werden.' };
 }
-
-// ---- Preis-Parsing (1:1 Logik-Port aus dem Python-Prototyp) ----------------------------
-
-function parseAmount(rawText) {
-  let digits = (rawText || '').replace(/[^\d.,]/g, '');
-  if (!digits) return null;
-  if (digits.includes(',')) {
-    digits = digits.replace(/\./g, '').replace(',', '.');
-  } else {
-    digits = digits.replace(/\./g, '');
-  }
-  const val = parseFloat(digits);
-  return Number.isNaN(val) ? null : val;
-}
-
-const TAX_LINE_RE = /steuern und geb/i;
-const AMOUNT_LINE_RE = /^(?:Preis\s+|Gesamt\s+)?([^\d\s]{1,6})\s*([\d][\d.,]*)\s*$/;
-const PRICE_PREFIX_RE = /^Preis\s+([^\d\s]{1,6})\s*([\d][\d.,]*)\s*$/;
-const EXCLUSIVE_TAX_LINE_RE = /nicht inbegriffen[:\s]*(.+)/i;
-const PCT_TOKEN_RE = /([\d]+(?:[.,]\d+)?)\s*%/g;
-const ROOM_CARD_LOOKAHEAD = 3;
-// Genius ist Bookings Treueprogramm. Der Rabatt gilt NUR eingeloggt ("...wenn Sie sich
-// anmelden oder sich kostenlos registrieren"), Booking zieht ihn aber trotzdem von der
-// "Gesamt"-Summe ab, die eine ausgeloggte Sitzung angezeigt bekommt. Wer das nicht
-// herausrechnet, meldet einen Preis, den der Nutzer so nicht bezahlen kann - und vergleicht
-// ausserdem Aepfel mit Birnen, sobald Booking den Rabatt nicht in jedem Land anzeigt.
-// "Genius-Praemien" (Sammelbegriff weiter unten auf der Seite) darf hier NICHT greifen.
-const GENIUS_LINE_RE = /genius[-\s]?rabatt/i;
-const NEG_AMOUNT_RE = /^[-\u2013\u2212]\s*([^\d\s]{1,6})\s*([\d][\d.,]*)\s*$/;
-const BACKSCAN_LINES = 6;
-
-function extractExclusiveTaxPct(context) {
-  const m = EXCLUSIVE_TAX_LINE_RE.exec(context || '');
-  if (!m) return null;
-  const pctValues = [...m[1].matchAll(PCT_TOKEN_RE)].map((x) => parseFloat(x[1].replace(',', '.')));
-  if (!pctValues.length) return null;
-  return pctValues.reduce((a, b) => a + b, 0);
-}
-
-// Manche Laender zeigen den Zimmerpreis OHNE Steuern und weisen sie als ABSOLUTEN Betrag aus:
-// "plus EGP 954 Steuern und Gebühren" (statt "Einschließlich Steuern und Gebühren"). Fuer einen
-// FAIREN Vergleich (Deutschland zeigt inkl.) muss dieser Betrag aufaddiert werden. Gibt den
-// zusaetzlichen Steuerbetrag in Landeswaehrung zurueck, oder null (Preis ist bereits inklusive).
-const ABS_EXTRA_TAX_RE = /(?:plus|zzgl\.?|zuz(?:ü|ue)glich|\+)\s+[^\d\s]{0,4}\s*([\d][\d.,]*)\s+steuern?\s+und\s+geb/i;
-function extractAbsoluteExtraTax(context) {
-  const m = ABS_EXTRA_TAX_RE.exec(context || '');
-  if (!m) return null;
-  return parseAmount(m[1]);
-}
-
-function looksLikeNewRoomHeading(lines, idx) {
-  if (idx >= lines.length || lines[idx].length > ROOM_NAME_MAX_LEN) return false;
-  for (let j = idx + 1; j < Math.min(idx + 1 + ROOM_CARD_LOOKAHEAD, lines.length); j++) {
-    if (lines[j].includes('m²')) return true;
-  }
-  return false;
-}
-
-// Zerlegt den Textblock eines Zimmers in seine Tarifstufen. Ausgelagert, weil BEIDE Stellen
-// dieselbe Sicht brauchen: die Preis-Erkennung unten und die Verpflegungs-/Storno-Optionen
-// fuers Dropdown. Solange die Optionsliste anders segmentierte als der Parser, bot das
-// Formular Tarife an, die es nicht gab - und verschwieg welche, die es gab.
-function tarifstufen(lines, start, maxEnd) {
-  const rawTiers = []; // { amount, cur, anchor, blockStart }
-  let lastAmountLine = -1;
-  let k = start + 1;
-  while (k < maxEnd) {
-    if (rawTiers.length && looksLikeNewRoomHeading(lines, k)) break;
-
-    const pm = PRICE_PREFIX_RE.exec(lines[k]);
-    if (pm) {
-      lastAmountLine = k;
-      rawTiers.push({ amount: pm[2], cur: pm[1], anchor: k, blockStart: rawTiers.length ? rawTiers[rawTiers.length - 1].anchor + 1 : start });
-    } else if (TAX_LINE_RE.test(lines[k])) {
-      // "Einschliesslich Steuern und Gebühren" steht IMMER direkt unter dem zugehoerigen
-      // Preis. Hat dieser Preis eine Zeile vorher schon eine Ratenstufe erzeugt, darf hier
-      // keine zweite fuer denselben Betrag entstehen.
-      //
-      // Genau das ist am 17.09. passiert und hat den falschen Preis geliefert. Booking gibt
-      // aus: "Preis € 1.523" / "Einschliesslich Steuern und Gebühren" / "Nicht kostenlos
-      // stornierbar". Die doppelte Stufe hatte als Kontext nur die eine Zeile "Preis € 1.523",
-      // weil die naechste Stufe unmittelbar folgte - also KEINE Storno-Angabe. Und eine Stufe
-      // ohne Storno-Angabe gilt unten als "nicht ausschliessbar", rutschte damit durch die
-      // Auswahl und verdraengte die tatsaechlich kostenlos stornierbare Rate zu 1.589 EUR.
-      const letzte = rawTiers.length ? rawTiers[rawTiers.length - 1] : null;
-      const gehoertZurLetztenStufe = letzte && (k - letzte.anchor) <= 2;
-      if (!gehoertZurLetztenStufe) {
-        let amount = null;
-        let cur = null;
-        for (let back = k - 1; back > Math.max(k - 1 - BACKSCAN_LINES, start); back--) {
-          if (back === lastAmountLine) break;
-          const m = AMOUNT_LINE_RE.exec(lines[back]);
-          if (m) { amount = m[2]; cur = m[1]; break; }
-        }
-        if (amount) rawTiers.push({ amount, cur, anchor: k, blockStart: rawTiers.length ? rawTiers[rawTiers.length - 1].anchor + 1 : start });
-      }
-    }
-    k++;
-  }
-  if (!rawTiers.length) return [];
-
-  // Genius-Abzug dieser Stufe suchen. Er steht VOR der "Gesamt"-Zeile, also im Block zwischen
-  // der vorigen Stufe und dem Anker dieser Stufe - der Kontext ab Anker reicht dafuer nicht.
-  const geniusAbzugIm = (blockStart, anchor) => {
-    for (let i = Math.max(0, blockStart); i <= anchor && i < lines.length; i++) {
-      if (!GENIUS_LINE_RE.test(lines[i])) continue;
-      for (let j = i + 1; j <= Math.min(i + 2, anchor); j++) {
-        const m = NEG_AMOUNT_RE.exec(lines[j]);
-        if (m) { const v = parseAmount(m[2]); if (v !== null) return v; }
-      }
-    }
-    return null;
-  };
-
-  // Kontext je Stufe bis zur NAECHSTEN Stufe begrenzen (max. 14 Zeilen), damit die
-  // Verpflegungs-/Stornierungserkennung nicht in die naechste Rate "ausblutet".
-  return rawTiers.map((t, i) => {
-    // Ende der letzten Stufe am Fenster des Zimmers festmachen, NICHT am Dateiende: sonst
-    // blutet der Kontext ins naechste Zimmer und dessen "Fruehstueck inbegriffen" wird
-    // faelschlich diesem Zimmer zugeschrieben.
-    const nextAnchor = i + 1 < rawTiers.length ? rawTiers[i + 1].anchor : maxEnd;
-    const end = Math.min(nextAnchor, t.anchor + 14);
-    return {
-      amount: t.amount, cur: t.cur, anchor: t.anchor, blockStart: t.blockStart,
-      ctx: lines.slice(t.anchor, end).join('\n'),
-      genius: geniusAbzugIm(t.blockStart, t.anchor),
-    };
-  });
-}
-
-function findRoomPrice(bodyText, roomName, boardType, cancelPref) {
-  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
-  const roomLower = roomName.toLowerCase();
-  let start = null;
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i].toLowerCase();
-    if (l === roomLower || l.startsWith(roomLower)) { start = i; break; }
-  }
-  if (start === null) return [null, null];
-
-  const stufen = tarifstufen(lines, start, Math.min(start + 250, lines.length));
-  if (!stufen.length) return [null, null];
-  const tiers = stufen.map((t) => [t.amount, t.ctx, t.cur, t.genius]);
-
-  // Deutsche Umlaute vereinheitlichen, damit z.B. Formularwert "fruehstueck" zu "Frühstück"
-  // auf der Seite passt (frueher schlug dieser Vergleich fehl -> falsche Rate).
-  const normDe = (s) => (s || '').toLowerCase()
-    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
-    .replace(/[\s-]/g, '');
-  // Tarif-Verpflegung ueber die Mahlzeiten-Zeile bestimmen (gleiche Logik wie beim Laden der
-  // Optionen), damit z.B. "Frühstück, Mittagessen & Abendessen" korrekt als Vollpension zaehlt.
-  const boardOfCtx = (ctx) => {
-    for (const line of (ctx || '').split('\n')) {
-      const b = boardOfLine(line);
-      if (b) return b;
-    }
-    return null;
-  };
-  const matchesBoard = (ctx) => {
-    if (!boardType || boardType === 'egal') return true;
-    const b = boardOfCtx(ctx);
-    if (b) return b === boardType;
-    return normDe(ctx).includes(normDe(boardType));
-  };
-  // Booking-Formulierungen: "Kostenlose Stornierung vor dem ..." (erstattbar) vs
-  // "Nicht kostenlos stornierbar" (nicht erstattbar).
-  const cancelOfCtx = (ctx) => {
-    for (const line of (ctx || '').split('\n')) {
-      const c = cancelOfLine(line);
-      if (c) return c;
-    }
-    return null;
-  };
-  const matchesCancel = (ctx) => {
-    if (!cancelPref || cancelPref === 'unsicher') return true;
-    const c = cancelOfCtx(ctx);
-    if (c) return c === cancelPref;
-    return true; // keine Storno-Info im Tarif -> nicht ausschliessen
-  };
-
-  // Auswahl-Priorität.
-  //
-  // Entscheidend ist der Unterschied zwischen "erfuellt den Wunsch ausdruecklich" und "sagt
-  // dazu nichts". Frueher galten beide als Treffer, deshalb konnte eine Rate ohne jede
-  // Storno-Angabe die Rate verdraengen, die der Nutzer tatsaechlich wollte. Eine Rate, bei der
-  // "Kostenlose Stornierung" DASTEHT, schlaegt jetzt immer eine, bei der nichts dasteht.
-  const hatStornoInfo = (ctx) => cancelOfCtx(ctx) !== null;
-  const hatBoardInfo = (ctx) => boardOfCtx(ctx) !== null;
-  const wunschStorno = !!cancelPref && cancelPref !== 'unsicher';
-  const stornoAusdruecklichPasst = (ctx) => wunschStorno && hatStornoInfo(ctx) && matchesCancel(ctx);
-
-  // 1. Verpflegung passt UND Storno passt ausdruecklich
-  for (const t of tiers) if (matchesBoard(t[1]) && stornoAusdruecklichPasst(t[1])) return t;
-  // 2. Storno passt ausdruecklich, Verpflegung passt oder steht gar nicht dabei
-  for (const t of tiers) if ((matchesBoard(t[1]) || !hatBoardInfo(t[1])) && stornoAusdruecklichPasst(t[1])) return t;
-  // 3./4./5. wie bisher: erst beides locker, dann Verpflegung, dann Storno, dann erste Stufe
-  for (const t of tiers) if (matchesBoard(t[1]) && matchesCancel(t[1])) return t;
-  for (const t of tiers) if (matchesBoard(t[1])) return t;
-  for (const t of tiers) if (matchesCancel(t[1])) return t;
-  return tiers[0];
-}
-
-// Waehrungssymbol/-kuerzel aus der Preiszeile in einen ISO-Code uebersetzen. Booking zeigt je
-// nach Hotel/Sitzung z.B. "US$2.238" auch in einer deutschen Sitzung - deshalb richtet sich die
-// Umrechnung nach der TATSAECHLICH angezeigten Waehrung, nicht nach dem Land des Proxys.
-// WICHTIG: Ein nacktes "$" steht hier BEWUSST NICHT fuer USD. Argentinien, Mexiko, Kolumbien,
-// Chile und Uruguay schreiben ihre eigene Waehrung ebenfalls "$". Die Gleichsetzung "$ = USD"
-// hat am 17.09. dazu gefuehrt, dass 2.762.635 argentinische Pesos als 2.762.635 US-Dollar
-// gelesen und zu 2.401.524,90 EUR umgerechnet wurden - ein Hotelzimmer fuer 2,4 Millionen Euro.
-// Ohne Eintrag faellt normalizeCurrency auf die Landeswaehrung der Sitzung zurueck, und das ist
-// bei einem nackten "$" immer die bessere Annahme. "US$" bleibt eindeutig und steht weiter drin.
-const CURRENCY_SYMBOLS = {
-  '€': 'EUR', 'US$': 'USD', 'USD$': 'USD', '£': 'GBP', '¥': 'JPY', 'CN¥': 'CNY',
-  'R$': 'BRL', 'CA$': 'CAD', 'A$': 'AUD', 'NZ$': 'NZD', 'MX$': 'MXN', 'AR$': 'ARS', 'CO$': 'COP',
-  '₺': 'TRY', '₹': 'INR', '₫': 'VND', '₱': 'PHP', '฿': 'THB', '₪': 'ILS', '₩': 'KRW', 'RP': 'IDR',
-  'E£': 'EGP', 'EG£': 'EGP', '₨': 'PKR', 'S/': 'PEN', 'S/.': 'PEN', 'CHF': 'CHF',
-};
-function normalizeCurrency(tok, fallback) {
-  if (!tok) return fallback;
-  const t = String(tok).trim().replace(/\s+/g, '');
-  if (CURRENCY_SYMBOLS[t]) return CURRENCY_SYMBOLS[t];
-  const up = t.toUpperCase();
-  if (CURRENCY_SYMBOLS[up]) return CURRENCY_SYMBOLS[up];
-  if (/^[A-Z]{3}$/.test(up)) return up;
-  return fallback;
-}
-
-function detectSessionCurrency(bodyText) {
-  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
-  for (const l of lines.slice(0, 8)) {
-    if (/^[A-Z]{3}$/.test(l)) return l;
-  }
-  return null;
-}
-
-// ---- Geraeteprofile -----------------------------------------------------------------------
-// Mehrere Leute im Vielfliegertreff berichten, dass bei Booking das GERAET den groessten
-// Preisunterschied macht - groesser als das Land. Messbar ist das nur, wenn wir mehr faelschen
-// als den User-Agent-String.
-//
-// Der haeufigste Fehler dabei: nur den UA aendern. Aktuelles Chrome schickt zusaetzlich
-// Client Hints (Sec-CH-UA, Sec-CH-UA-Mobile, Sec-CH-UA-Platform). Bleiben die auf dem echten
-// Wert der Lambda-Umgebung ("Linux", mobile: ?0), waehrend der UA "iPhone" behauptet, ist der
-// Widerspruch fuer jede Bot-Erkennung offensichtlich - und Booking liefert dann womoeglich
-// genau deshalb andere Preise, was wir faelschlich als Geraete-Effekt lesen wuerden.
-// Deshalb wird pro Profil AUCH die Metadata gesetzt, plus passender Viewport und Touch.
-const DEVICE_PROFILES = {
-  // Der bisherige Standard - bleibt Default, damit alte Messungen vergleichbar bleiben.
-  windows: {
-    label: 'Windows/Desktop',
-    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 900, deviceScaleFactor: 1, isMobile: false, hasTouch: false },
-    meta: { platform: 'Windows', platformVersion: '15.0.0', architecture: 'x86', bitness: '64', mobile: false, model: '' },
-  },
-  mac: {
-    label: 'macOS/Desktop',
-    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    viewport: { width: 1440, height: 900, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
-    meta: { platform: 'macOS', platformVersion: '14.4.0', architecture: 'arm', bitness: '64', mobile: false, model: '' },
-  },
-  android: {
-    label: 'Android/Smartphone',
-    ua: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36',
-    viewport: { width: 412, height: 915, deviceScaleFactor: 2.6, isMobile: true, hasTouch: true },
-    meta: { platform: 'Android', platformVersion: '14.0.0', architecture: '', bitness: '', mobile: true, model: 'Pixel 8' },
-  },
-  // iPhone laeuft mit Safari-Kennung. Client Hints schickt Safari nicht, deshalb hier keine
-  // Metadata - das ist bei einem echten iPhone genauso und faellt daher nicht auf.
-  iphone: {
-    label: 'iOS/iPhone',
-    ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-    viewport: { width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
-    meta: null,
-  },
-};
-const DEFAULT_DEVICE = 'windows';
-// Messung vom 17.09.: Die Emulation greift - Booking liefert einer Android-Kennung eine andere
-// Seite aus. Der Parser versteht diese Seite aber NICHT. Er findet dort 11 "Zimmer" namens
-// "Zimmer", "Nichtraucherzimmer", "Familienzimmer" - das sind Filterbezeichnungen des mobilen
-// Layouts, keine Zimmerkategorien. Ergebnis waere also nicht "kein Preis", sondern ein
-// falscher Preis, der plausibel aussieht. Solche Zahlen sind schlimmer als keine.
-//
-// Deshalb: mobile Profile nur im Debug-Modus. Erst wenn das mobile Layout eigenstaendig
-// geparst wird, duerfen sie fuer echte Abfragen frei.
-const MOBILE_READY = false;
-function deviceProfile(name) {
-  return DEVICE_PROFILES[String(name || '').toLowerCase()] || DEVICE_PROFILES[DEFAULT_DEVICE];
-}
-// Gibt das tatsaechlich zu verwendende Profil zurueck - und faellt bei noch nicht
-// unterstuetzten Mobilprofilen sichtbar auf Desktop zurueck, statt stillschweigend Unsinn
-// zu messen.
-function resolveDevice(wunsch, debugErlaubt) {
-  const name = String(wunsch || DEFAULT_DEVICE).toLowerCase();
-  const prof = DEVICE_PROFILES[name];
-  if (!prof) return DEFAULT_DEVICE;
-  if (prof.viewport.isMobile && !MOBILE_READY && !debugErlaubt) {
-    console.log(`[device] "${name}" angefragt, aber das mobile Layout wird noch nicht geparst - nutze ${DEFAULT_DEVICE}.`);
-    return DEFAULT_DEVICE;
-  }
-  return name;
-}
-
-// ---- Ein Land pruefen (Proxy + Headless-Chrome, Bilder/Fonts/Stylesheets geblockt) --------
-
-// blockScripts: zusaetzlich zu Bildern/Fonts/CSS auch Bookings eigene JavaScript-Bundles
-// verwerfen. Die machen den Loewenanteil des Proxy-Traffics aus, und die Zimmertabelle steht
-// im ausgelieferten HTML - ob sie OHNE Skripte noch vollstaendig ist, muss aber gemessen
-// werden, nicht angenommen. Deshalb als Schalter, nicht als fixe Aenderung.
-async function attemptFetch(targetUrl, proxyServer, proxyAuth, blockScripts, device) {
-  let browser;
-  // Ausserhalb des try, damit der bis zum Abbruch verbrauchte Traffic auch im Fehlerfall
-  // zurueckgegeben werden kann.
-  let transferBytes = 0;
-  const prof = deviceProfile(device);
-  try {
-    const launchArgs = proxyServer ? [...chromium.args, `--proxy-server=${proxyServer}`] : [...chromium.args];
-    browser = await puppeteer.launch({
-      args: launchArgs,
-      defaultViewport: prof.viewport,
-      executablePath: await chromium.executablePath(CHROMIUM_PACK_URL),
-      headless: chromium.headless,
-    });
-    const page = await browser.newPage();
-    if (proxyServer && proxyAuth) await page.authenticate(proxyAuth);
-    await page.setViewport(prof.viewport);
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'de-DE,de;q=0.9' });
-
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      try {
-        const typ = req.resourceType();
-        if (BLOCKED_RESOURCE_TYPES.has(typ)) return req.abort();
-        if (blockScripts && typ === 'script') return req.abort();
-        const host = new URL(req.url()).hostname;
-        if (TRACKER_HOST_RE.test(host)) return req.abort();
-        if (!ALLOWED_HOST_RE.test(host)) return req.abort(); // alle Drittanbieter-Domains
-        return req.continue();
-      } catch (e) {
-        try { return req.continue(); } catch (e2) { /* Request bereits behandelt */ }
-      }
-    });
-
-    // Tatsaechlich uebertragene Bytes zaehlen - das ist exakt das, was Smartproxy abrechnet.
-    //
-    // Frueher wurde hier der content-length-Header aufsummiert. Das war praktisch wertlos:
-    // Booking liefert fast alles chunked aus, also ganz ohne content-length, und komprimiert
-    // zusaetzlich. Gemessen wurden dadurch 7 KB fuer eine Seite mit zwei Dutzend Zimmern -
-    // eine Zahl, mit der man keine Entscheidung ueber Proxy-Kosten treffen kann.
-    //
-    // Network.loadingFinished liefert encodedDataLength: die real ueber die Leitung gegangene,
-    // komprimierte Byte-Zahl inklusive Header. Genau die richtige Groesse.
-    try {
-      const cdp = await page.target().createCDPSession();
-      await cdp.send('Network.enable');
-      cdp.on('Network.loadingFinished', (e) => { transferBytes += (e && e.encodedDataLength) || 0; });
-
-      // Geraeteprofil setzen: User-Agent UND Client Hints in einem Zug. Ueber CDP, weil nur so
-      // die userAgentMetadata mitgeht - mit page.setUserAgent() allein bliebe
-      // Sec-CH-UA-Platform auf "Linux" und Sec-CH-UA-Mobile auf "?0" stehen. Ein UA, der
-      // "iPhone" behauptet, waehrend die Client Hints "Linux, nicht mobil" sagen, ist fuer
-      // Booking sofort als Faelschung erkennbar - und dann messen wir nicht den Geraete-Effekt,
-      // sondern die Reaktion auf einen auffaelligen Bot.
-      await cdp.send('Emulation.setUserAgentOverride', {
-        userAgent: prof.ua,
-        acceptLanguage: 'de-DE,de;q=0.9',
-        platform: prof.meta ? prof.meta.platform : 'iPhone',
-        ...(prof.meta ? {
-          userAgentMetadata: {
-            brands: [
-              { brand: 'Chromium', version: '123' },
-              { brand: 'Google Chrome', version: '123' },
-              { brand: 'Not:A-Brand', version: '99' },
-            ],
-            fullVersion: '123.0.0.0',
-            platform: prof.meta.platform,
-            platformVersion: prof.meta.platformVersion,
-            architecture: prof.meta.architecture,
-            bitness: prof.meta.bitness,
-            model: prof.meta.model,
-            mobile: prof.meta.mobile,
-          },
-        } : {}),
-      });
-      if (prof.viewport.hasTouch) {
-        await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-      }
-    } catch (e) {
-      // Faellt CDP aus, laeuft alles weiter - aber dann OHNE korrekte Geraetekennung. Das muss
-      // im Log stehen, sonst messen wir Desktop und schreiben "Mobil" in die Tabelle.
-      console.log('[attemptFetch] CDP-Override fehlgeschlagen, Geraeteprofil evtl. unwirksam:', (e && e.message) || e);
-      try { await page.setUserAgent(prof.ua); } catch (e2) { /* ignorieren */ }
-    }
-
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 13000 });
-
-    for (const sel of ["button ::-p-text('Alle akzeptieren')", '#onetrust-accept-btn-handler']) {
-      try {
-        await page.click(sel, { timeout: 1200 });
-        break;
-      } catch (e) { /* kein Banner - ignorieren */ }
-    }
-
-    try {
-      await page.waitForFunction(
-        () => !!document.body && /Zimmerkategorie|Preis für|Art der Unterbringung/i.test(document.body.innerText),
-        { timeout: 9000 }
-      );
-    } catch (e) {
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-
-    try {
-      await page.evaluate(() => window.scrollBy(0, 2500));
-      await new Promise((r) => setTimeout(r, 1200));
-    } catch (e) { /* ignorieren */ }
-
-    // Null-sicher: unter Last kann document.body beim Auslesen noch fehlen - das darf den
-    // gesamten Abruf nicht abbrechen lassen.
-    const bodyText = await page.evaluate(() => (document.body && document.body.innerText) || '');
-
-    // Zimmer direkt aus dem DOM der Zimmertabelle lesen: pro Zeile der erste Link (= der blaue
-    // Zimmername, exakt was der Nutzer sieht) plus die in DIESEM Zimmerblock real vorhandenen
-    // Verpflegungs- und Storno-Optionen (ueber alle Tarifzeilen des Zimmers). Viel zuverlaessiger
-    // als aus dem reinen Text zu raten.
-    let roomData = [];
-    let roomMeta = null;
-    try {
-      // ROOM_NAME_MAX_LEN wird hineingereicht: der Code unten laeuft im Browser, dort sind die
-      // Konstanten dieser Datei nicht sichtbar.
-      const ev = await page.evaluate((ROOM_NAME_MAX_LEN) => {
-        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-        const boardsOf = (t) => {
-          t = t.toLowerCase();
-          const b = [];
-          if (/all[-\s]?inclusive/.test(t)) b.push('allinclusive');
-          if (/vollpension/.test(t)) b.push('vollpension');
-          if (/halbpension|abendessen inbegriffen/.test(t)) b.push('halbpension');
-          if (/fr(ü|ue)hst(ü|ue)ck/.test(t)) b.push('fruehstueck');
-          if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only/.test(t)) b.push('uebernachtung');
-          return [...new Set(b)];
-        };
-        const cancelsOf = (t) => {
-          t = t.toLowerCase();
-          const c = [];
-          if (/kostenlose stornierung|kostenlos stornierbar/.test(t)) c.push('ja');
-          if (/teilweise erstattbar/.test(t)) c.push('teilweise');
-          if (/nicht erstattbar|nicht kostenlos stornierbar|keine kostenlose stornierung/.test(t)) c.push('nein');
-          return [...new Set(c)];
-        };
-        const order = [];
-        const map = {};
-        const addRow = (name, txt) => {
-          if (!map[name]) { map[name] = ''; order.push(name); }
-          map[name] += ' ' + (txt || '');
-        };
-        let strategy = 0;
-        let tablesTotal = document.querySelectorAll('table').length;
-        // Strategie 1: klassische Zimmertabelle. Der Zimmername steht per rowspan nur in der ersten
-        // Tarifzeile; Folgezeilen gehoeren zum selben (zuletzt gesehenen) Zimmer.
-        for (const tbl of document.querySelectorAll('table')) {
-          const ths = [...tbl.querySelectorAll('th')].map((th) => (th.innerText || '').toLowerCase());
-          if (!ths.some((h) => /zimmerkategorie|unterkunftstyp|zimmertyp|art der unterbringung|unterbringungsart|room type|accommodation type/.test(h))) continue;
-          let cur = null;
-          for (const row of tbl.querySelectorAll('tr')) {
-            // Zimmernamen stehen je nach Layout in TD ODER in einer TH-Zeilenkopfzelle.
-            const firstTd = [...row.children].find((c) => c.tagName === 'TD' || c.tagName === 'TH');
-            if (!firstTd) continue;
-            const a = firstTd.querySelector('a');
-            const nm = a ? clean(a.innerText) : '';
-            // Laengenobergrenze nur als Schutz gegen versehentlich gegriffene Textabsaetze.
-            // Sie war mit 70 viel zu knapp: Booking haengt an Zimmernamen gern Zusaetze an
-            // ("... - kleinere Villa", "... mit Meerblick"), und genau die laengeren Namen
-            // gehoeren oft zu den GUENSTIGSTEN Kategorien. Ein Name mit 71 Zeichen fiel so
-            // lautlos raus - der Nutzer sah drei statt vier Zimmern und ausgerechnet das
-            // billigste fehlte. Die eigentliche Absicherung ist hier ohnehin die Struktur
-            // (erster Link in der Zimmerzeile der Zimmertabelle), nicht die Laenge.
-            if (nm && nm.length >= 3 && nm.length <= ROOM_NAME_MAX_LEN) cur = nm;
-            if (cur) addRow(cur, row.innerText);
-          }
-          if (order.length) { strategy = 1; break; }
-        }
-        // Strategie 2 (Fallback): nur Namen aus bekannten Zimmernamen-Links.
-        if (!order.length) {
-          const sel = 'a.hprt-roomtype-icon-link, .hprt-roomtype-link, [data-testid="room-name"], [data-testid="rt-title"], [data-component="room-type-name"]';
-          for (const el of document.querySelectorAll(sel)) {
-            const nm = clean(el.innerText || el.textContent);
-            if (nm && nm.length >= 3 && nm.length <= ROOM_NAME_MAX_LEN) addRow(nm, '');
-          }
-          if (order.length) strategy = 2;
-        }
-        const rooms = order.map((name) => ({ name, boards: boardsOf(map[name]), cancels: cancelsOf(map[name]) }));
-        const meta = {
-          strategy,
-          tablesTotal,
-          firstOptSample: order.length ? (map[order[0]] || '').slice(0, 260) : '',
-          bodyHasFruehstueck: /fr(ü|ue)hst(ü|ue)ck/i.test((document.body && document.body.innerText) || ''),
-          bodyHasStorno: /stornier/i.test((document.body && document.body.innerText) || ''),
-        };
-        return { rooms, meta };
-      }, ROOM_NAME_MAX_LEN);
-      roomData = ev.rooms || [];
-      roomMeta = ev.meta || null;
-    } catch (e) { roomData = []; }
-
-    await browser.close();
-    // "Geladen" heisst: die Zimmer-/Preistabelle ist wirklich da. Eine starre Zeilenzahl hat
-    // schwere Seiten faelschlich verworfen, obwohl Zimmer und Preise vorhanden waren.
-    const lineCount = bodyText.split('\n').length;
-    const hasRoomTable = /Zimmerkategorie|Art der Unterbringung|Unterkunftstyp|Zimmertyp|Preis für/i.test(bodyText);
-    const loadedOk = hasRoomTable ? lineCount >= 80 : lineCount >= MIN_LOADED_LINES;
-    console.log(`[attemptFetch] geladen: ${(transferBytes / 1024).toFixed(0)} KB (${lineCount} Zeilen)`);
-    return { bodyText, rooms: roomData, roomMeta, loadedOk, transferBytes, err: null };
-  } catch (err) {
-    console.error('[attemptFetch] Fehler beim Laden/Chromium-Start:', (err && err.stack) || err);
-    if (browser) { try { await browser.close(); } catch (e) { /* ignorieren */ } }
-    // Auch ein gescheiterter Versuch hat schon Traffic verbraucht - der muss mitgezaehlt
-    // werden, sonst sieht die Kostenbilanz besser aus als sie ist.
-    return { bodyText: null, rooms: [], loadedOk: false, transferBytes, err };
-  }
-}
-
-async function fetchPrice(countryCode, targetUrl, proxyServer, userPrefix, password, room, board, cancel, rates, maxAttempts, device) {
-  const attempts = maxAttempts || MAX_ATTEMPTS;
-  const t0 = Date.now();
-  const proxyAuth = { username: `${userPrefix}${countryCode}`, password };
-  const expectedCurrency = DEFAULT_CURRENCY_BY_COUNTRY[countryCode];
-  const result = { country: countryCode, priceRaw: null, currency: null, priceLocal: null, priceEuro: null };
-
-  let bodyText = null;
-  let loadedOk = false;
-  let lastErr = null;
-  // Zimmerliste aus dem DOM der Zimmertabelle - deutlich sauberer als die Text-Heuristik
-  // (die faengt sonst "Zimmer auswaehlen", "Eigenes Badezimmer" oder Bewertungszeilen mit ein).
-  let roomData = [];
-
-  // Traffic ueber ALLE Versuche dieses Landes summieren - Fehlversuche kosten genauso.
-  result.transferBytes = 0;
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const r = await attemptFetch(targetUrl, proxyServer, proxyAuth, BLOCK_BOOKING_SCRIPTS, device);
-    result.transferBytes += r.transferBytes || 0;
-    bodyText = r.bodyText;
-    loadedOk = r.loadedOk;
-    lastErr = r.err;
-    if (r.rooms && r.rooms.length) roomData = r.rooms;
-    if (loadedOk && expectedCurrency) {
-      const seen = detectSessionCurrency(bodyText);
-      // Nur protokollieren, NICHT verwerfen: Booking zeigt z.B. bei US-Hotels auch in einer
-      // deutschen Sitzung US-Dollar. Die Umrechnung erfolgt unten anhand der echten Waehrung.
-      if (seen && seen !== expectedCurrency) {
-        console.log(`[fetchPrice] ${countryCode}: Sitzungswaehrung ${seen} statt ${expectedCurrency}`);
-      }
-    }
-    if (loadedOk) break;
-  }
-
-  console.log(`[fetchPrice] ${countryCode}: ${loadedOk ? 'ok' : 'kein Preis'} nach ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-
-  if (!loadedOk) {
-    result.priceRaw = lastErr ? `Fehler: ${lastErr.message || lastErr}` : 'Seite nicht vollständig geladen (Proxy-Exit instabil)';
-    return result;
-  }
-
-  const [rawAmt, ctx, curTok, geniusAbzug] = findRoomPrice(bodyText, room, board, cancel);
-  // Waehrung aus der tatsaechlichen Preiszeile ableiten (Fallback: Landeswaehrung).
-  const currency = normalizeCurrency(curTok, expectedCurrency || 'EUR');
-  if (rawAmt) {
-    let val = parseAmount(rawAmt);
-    const taxPct = extractExclusiveTaxPct(ctx);
-    const absExtra = extractAbsoluteExtraTax(ctx);
-    if (val !== null && taxPct !== null) {
-      val = Math.round(val * (1 + taxPct / 100) * 100) / 100;
-      result.priceRaw = `${rawAmt} (${currency}, zzgl. ${taxPct}% Steuer -> steuerinkl.: ${val})`;
-    } else if (val !== null && absExtra !== null) {
-      val = Math.round((val + absExtra) * 100) / 100;
-      result.priceRaw = `${rawAmt} (${currency}, zzgl. ${absExtra} ${currency} Steuern -> steuerinkl.: ${val})`;
-    } else {
-      result.priceRaw = `${rawAmt} (${currency}, inkl. Steuern & Gebühren)`;
-    }
-    // Genius herausrechnen. Booking zieht den Rabatt auch einer ausgeloggten Sitzung von der
-    // Gesamtsumme ab, zahlbar ist er aber nur mit Konto. Ohne diese Korrektur meldet das Tool
-    // einen Preis, den der Nutzer nicht bekommt - und schlimmer: Zeigt Booking den Rabatt in
-    // einem Land an und im anderen nicht, misst der Laendervergleich nur noch den Rabatt.
-    if (val !== null && geniusAbzug) {
-      const vorher = val;
-      val = Math.round((val + geniusAbzug) * 100) / 100;
-      result.geniusHerausgerechnet = geniusAbzug; // geht mit in die Antwort (Hinweis im Frontend)
-      result.priceRaw += ` | ohne Genius: ${vorher} + ${geniusAbzug} = ${val} (Genius gilt nur eingeloggt)`;
-    }
-    result.currency = currency;
-    result.priceLocal = val; // Betrag in der Landeswaehrung (zur VPN-Kontrolle im Frontend)
-    if (val !== null) {
-      const rate = rates[currency];
-      if (rate) result.priceEuro = Math.round(val * rate * 100) / 100;
-    }
-  } else {
-    result.priceRaw = `Zimmer "${room}" auf dieser Landes-Session nicht gefunden/verfügbar`;
-    // Diagnose statt Sackgasse: "kein Preis gefunden" ist die nutzloseste aller Antworten,
-    // wenn der Grund schlicht ein Zimmername ist, den es auf der Seite nie gab. Genau das
-    // ist am 17.09. passiert - jemand suchte "Superior Zimmer", das Hotel hatte aber nur
-    // "Superior Double Room with Hagia Sophia View". Zwei Versuche, zweimal nichts, dabei
-    // waeren ueber Japan 10,9 % drin gewesen. Deshalb sammeln wir hier, was wirklich auf der
-    // Seite steht, damit das Frontend dem Nutzer den Weg zeigen kann statt ihn wegzuschicken.
-    // Reine Textarbeit auf dem ohnehin geladenen bodyText, also kein zusaetzlicher Traffic.
-    try {
-      const basis = roomData.length
-        ? roomData
-        : listRooms(bodyText).map((n) => ({ name: n, boards: [], cancels: [] }));
-      const opts = enrichRoomOptions(bodyText, basis);
-      const gesucht = String(room || '').trim().toLowerCase();
-      const treffer = opts.find((o) => o.name.trim().toLowerCase() === gesucht);
-      // Dritter Fall neben "Zimmer gibt es nicht" und "Verpflegung passt nicht": Das Zimmer
-      // steht auf der Seite, hat fuer diesen Zeitraum aber gar keine Tarifzeile - typischerweise
-      // ausgebucht. Ohne diese Unterscheidung landet der Nutzer beim allgemeinen Text, der ihm
-      // faelschlich fehlende Reisedaten unterstellt, obwohl sein Link welche hat.
-      const hatTarife = (o) => !!o && ((o.boards || []).length > 0 || (o.cancels || []).length > 0);
-      result.diagnose = {
-        zimmerGefunden: !!treffer,
-        ohneTarife: treffer ? !hatTarife(treffer) : null,
-        verpflegungPasst: treffer
-          ? (!board || board === 'egal' || !(treffer.boards || []).length || treffer.boards.includes(board))
-          : null,
-        zimmerAufSeite: opts.slice(0, 12).map((o) => ({
-          name: o.name, boards: o.boards || [], cancels: o.cancels || [],
-        })),
-      };
-    } catch (e) { /* Diagnose ist Zugabe - ein Fehler darf die Antwort nicht kippen */ }
-  }
-  return result;
-}
-
-// ---- Cloudflare Turnstile Bot-Check -----------------------------------------------------
-
-async function verifyTurnstile(token, remoteIp) {
-  const secret = process.env.TURNSTILE_SECRET_KEY;
-  if (!secret) return true; // nicht konfiguriert -> Check übersprungen (Setup noch offen)
-  if (!token) return false;
-  try {
-    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ secret, response: token, remoteip: remoteIp || '' }),
-    });
-    const json = await res.json();
-    return !!json.success;
-  } catch (e) {
-    return false;
-  }
-}
-
-// ---- Ergebnis-Cache (Upstash Redis REST, optional) ----------------------------------------
-
-// Das Geraet MUSS in den Cache-Schluessel. Sonst liefert eine Mobil-Abfrage das gecachte
-// Desktop-Ergebnis zurueck - und genau der Unterschied, den wir messen wollen, waere
-// wegdefiniert, ohne dass es jemand merkt.
-// Hochzaehlen, wenn sich aendert WAS gemessen wird (nicht bei reinen Fehlerkorrekturen).
-// Sonst liefert der Cache nach einem solchen Deploy bis zu 24 Stunden lang Ergebnisse nach
-// altem Umfang zurueck - und man sucht den Fehler im neuen Code statt im Cache.
-// v2: dynamischer Platz fuer das Land der Unterkunft (19.09.2026).
-// v3: Schluessel wird aus dem BEREINIGTEN Link gebildet (20.09.2026).
-const CACHE_VERSION = 'v3';
-
-// Der Schluessel darf nicht aus dem rohen Link gebildet werden. Zwei Besucher, die dasselbe
-// Hotel zum selben Termin suchen, haben fast nie denselben Link: Booking haengt sid, aid, label
-// und diverse Trackingparameter an, und die unterscheiden sich pro Sitzung. Jeder dieser Links
-// war bisher ein eigener Cache-Eintrag - also ein Fehlschlag und rund 30 MB bezahlter Traffic
-// fuer eine Suche, deren Antwort schon dalag.
-//
-// Deshalb hier dieselbe Bereinigung wie fuers Log (linkFuersLog entfernt Sitzungs- und
-// Trackingparameter) plus die Sprachnormalisierung (normalisiereLinkFuerAbruf zwingt auf .de.html),
-// denn ".en-gb.html" und ".de.html" desselben Hotels liefern dieselben Preise.
-function cacheKeyFor(link, room, board, cancel, device) {
-  let basis = link;
-  try { basis = linkFuersLog(normalisiereLinkFuerAbruf(link)) || link; } catch (e) { /* Rohlink als Rueckfall */ }
-  return 'georates:' + crypto.createHash('sha256')
-    .update(`${CACHE_VERSION}|${basis}|${room}|${board}|${cancel}|${device || DEFAULT_DEVICE}`).digest('hex').slice(0, 32);
-}
-
-async function cacheGet(key) {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return null;
-  try {
-    const res = await fetch(`${url}/get/${key}`, { headers: { Authorization: `Bearer ${token}` } });
-    const json = await res.json();
-    return json && json.result ? JSON.parse(json.result) : null;
-  } catch (e) { return null; }
-}
-
-async function cacheSet(key, value) {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return;
-  try {
-    await fetch(`${url}/set/${key}?EX=${CACHE_TTL_SECONDS}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify(value),
-    });
-  } catch (e) { /* ignorieren - Cache ist nur Optimierung, kein kritischer Pfad */ }
-}
-
-// ---- Einfache Zaehlbremse pro IP (Upstash) ----------------------------------------------
-// Gedacht fuer den "rooms"-Modus: Der laeuft bewusst ohne Turnstile, loest aber echten
-// Proxy-Traffic aus. Ohne Bremse koennte jemand den Endpunkt in einer Schleife aufrufen und
-// Kosten verursachen, ohne je einen Bot-Check zu sehen. Ist Upstash nicht konfiguriert, wird
-// nicht gebremst - wie beim Cache ist das ein Optimierungs-, kein Sicherheitsfundament.
-const ROOMS_RATE_LIMIT = 20;            // Abrufe ...
-const ROOMS_RATE_WINDOW_SECONDS = 3600; // ... pro IP und Stunde
-// Dieselbe Bremse gilt seit dem 20.09. auch fuer den Preis-Check. Turnstile haelt Skripte ab,
-// aber es BEGRENZT nichts: Wer den Bot-Check besteht, kann beliebig oft suchen, und jede Suche
-// kostet rund 30 MB bezahlten Residential-Traffic. Vorher entschied allein das Verhalten der
-// Besucher, wie hoch die Rechnung am Monatsende wird.
-const PRICE_RATE_LIMIT = 12;            // Suchen ...
-const PRICE_RATE_WINDOW_SECONDS = 3600; // ... pro IP und Stunde
-async function rateLimitUeberschritten(bucket, ip, limit, windowSeconds) {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token || !ip) return false;
-  const key = `rl:${bucket}:${crypto.createHash('sha256').update(ip).digest('hex').slice(0, 24)}`;
-  try {
-    const auth = { Authorization: `Bearer ${token}` };
-    const res = await fetch(`${url}/incr/${key}`, { headers: auth });
-    const json = await res.json();
-    const count = Number(json && json.result);
-    if (!Number.isFinite(count)) return false;
-    if (count === 1) await fetch(`${url}/expire/${key}/${windowSeconds}`, { headers: auth });
-    return count > limit;
-  } catch (e) { return false; }
-}
-
-// ---- Tagesdeckel fuer den Proxy-Verbrauch ------------------------------------------------
-// Die Bremse pro IP faengt den Einzelnen ab, der den Endpunkt in einer Schleife aufruft. Sie
-// hilft nicht, wenn die Anfragen aus vielen verschiedenen IPs kommen - und genau dann wird es
-// teuer, weil jede Suche rund 30 MB bezahlten Traffic zieht.
-//
-// Deshalb zusaetzlich eine harte Obergrenze pro Kalendertag. Ist sie erreicht, antwortet die
-// Seite ehrlich mit "heute ausgelastet", statt weiterzulaufen und die Rechnung zu treiben. Eine
-// abgelehnte Suche aergert einen Besucher; eine vierstellige Proxy-Rechnung beendet das Projekt.
-//
-// Gezaehlt wird ERST nach dem Cache-Treffer und erst kurz bevor wirklich Proxies anlaufen -
-// eine aus dem Cache beantwortete Suche kostet nichts und darf das Budget nicht belasten.
-// Der Wert laesst sich ueber die Umgebungsvariable anheben, ohne den Code anzufassen.
-const TAGESBUDGET_SUCHEN = Number(process.env.TAGESBUDGET_SUCHEN || 300);
-async function tagesbudgetAufgebraucht() {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  // Ohne Upstash keine Bremse. Bewusst so: lieber laufen lassen als bei einer Stoerung des
-  // Zaehlers faelschlich jede Suche abweisen. Das Risiko traegt der Betreiber, nicht der Nutzer.
-  if (!url || !token) return false;
-  const tag = new Date().toISOString().slice(0, 10); // UTC-Tag, reicht fuer einen groben Deckel
-  const key = `budget:suchen:${tag}`;
-  try {
-    const auth = { Authorization: `Bearer ${token}` };
-    const res = await fetch(`${url}/incr/${key}`, { headers: auth });
-    const json = await res.json();
-    const count = Number(json && json.result);
-    if (!Number.isFinite(count)) return false;
-    // Nur beim ersten Zaehler des Tages eine Lebensdauer setzen, sonst haeuften sich die
-    // Schluessel vergangener Tage unbegrenzt an.
-    if (count === 1) await fetch(`${url}/expire/${key}/172800`, { headers: auth });
-    if (count > TAGESBUDGET_SUCHEN) {
-      console.log(`[budget] Tagesdeckel erreicht: ${count} > ${TAGESBUDGET_SUCHEN} (${tag})`);
-      return true;
-    }
-    return false;
-  } catch (e) { return false; }
-}
-
-// ---- Messwerkzeuge absichern --------------------------------------------------------------
-// debug, debugLines, noScripts und die freie Geraetewahl sind Diagnosewerkzeuge: Sie kosten
-// zusaetzlichen Proxy-Traffic und geben Ausschnitte des geladenen Seitentexts zurueck. Bisher
-// konnte sie jeder setzen, der die Adresse des Endpunkts kennt - und die steht im Frontend.
-//
-// Sie bleiben erreichbar, aber nur mit dem passenden Header. Ohne gesetztes DEBUG_SECRET sind
-// sie vollstaendig aus; das ist der richtige Ruhezustand, wenn niemand bewusst etwas messen will.
-// Das Frontend schickt keinen dieser Schalter, der normale Betrieb merkt davon also nichts.
-//
-// Kein Konstantzeit-Vergleich: Das hier schuetzt Traffic, keine Nutzerdaten. Wer das Secret
-// erraet, sieht Seitentext von Booking.com - aerglich, aber kein Datenleck.
-function debugErlaubt(req) {
-  const secret = process.env.DEBUG_SECRET;
-  if (!secret) return false;
-  const mitgeschickt = req.headers && req.headers['x-georates-debug'];
-  return typeof mitgeschickt === 'string' && mitgeschickt === secret;
-}
-
-// ---- Abfrage-Log (optional, an eine Google-Tabelle via Apps-Script-Webhook) ----------------
-
-const LOG_BOARD_LABEL = { uebernachtung: 'Nur Übernachtung', fruehstueck: 'Frühstück', halbpension: 'Halbpension', vollpension: 'Vollpension', allinclusive: 'All-Inclusive', egal: 'Egal' };
-const LOG_CANCEL_LABEL = { ja: 'Kostenlos stornierbar', teilweise: 'Teilweise erstattbar', nein: 'Nicht kostenlos stornierbar', unsicher: 'Egal' };
-const LOG_COUNTRY_LABEL = { DE: 'Deutschland', CO: 'Kolumbien', AR: 'Argentinien', EG: 'Ägypten', IN: 'Indien', VN: 'Vietnam', ID: 'Indonesien', PK: 'Pakistan', LK: 'Sri Lanka', PE: 'Peru', MX: 'Mexiko', PH: 'Philippinen', TH: 'Thailand', US: 'USA', JP: 'Japan' };
-
-// Bisher stand in der Tabelle nur das Siegerland. Ein Land, das regelmaessig Zweiter wird,
-// tauchte damit nie auf - und die Frage "liegt Land X systematisch daneben?" liess sich nicht
-// beantworten, obwohl alle Zahlen vorliegen. Deshalb alle geprueften Laender in eine Zelle.
-//
-// Format: DE:1292.06:EUR|JP:1264:JPY|US:-:USD  - feste Reihenfolge, "-" fuer "kein Preis".
-// Die Waehrung gehoert dazu: Nur an ihr laesst sich erkennen, welche Werte WIR umgerechnet
-// haben (alles ausser EUR). Genau die stehen im Verdacht, Scheinfunde zu erzeugen, weil
-// Booking mit eigenem Kurs verkauft (siehe OFFEN.md, Punkt 1).
-function alleLaenderFuersLog(results, laender) {
-  const nachLand = new Map(results.map((r) => [r.country, r]));
-  return (laender || ALL_COUNTRIES)
-    .filter((c) => nachLand.has(c))
-    .map((c) => {
-      const r = nachLand.get(c);
-      return `${c}:${r.priceEuro != null ? r.priceEuro : '-'}:${r.currency || '-'}`;
-    })
-    .join('|');
-}
-
-// Booking-Links enthalten neben Hotel und Reisedaten auch Kennungen, die nichts in einem
-// Protokoll zu suchen haben - allen voran "sid", die Kennung der Booking-SITZUNG des Nutzers.
-// Am 17.09. hat ein Forenmitglied seine eigene Hotelsuche in unserem Quelltext wiedererkannt;
-// das war der Anlass, hier aufzuraeumen.
-//
-// Entfernt werden Sitzungs-, Partner- und Tracking-Parameter. Was fuer die Auswertung
-// gebraucht wird - Hotel und Reisezeitraum - bleibt erhalten, sonst liesse sich ein alter
-// Fund spaeter nicht mehr nachmessen.
-const LOG_STRIP_PARAMS = new Set([
-  'sid', 'aid', 'label', 'sb_price_type', 'srepoch', 'srpvid', 'lang', 'soz', 'lp', '_',
-  'highlighted_blocks', 'matching_block_id', 'sr_pri_blocks', 'all_sr_blocks', 'hapos', 'hpos',
-  'dest_id', 'dest_type', 'dist', 'sr_order', 'ucfs', 'atlas_src', 'utm_source', 'utm_medium',
-  'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'msclkid',
-]);
-function linkFuersLog(link) {
-  try {
-    const u = new URL(link);
-    for (const p of [...u.searchParams.keys()]) {
-      if (LOG_STRIP_PARAMS.has(p.toLowerCase())) u.searchParams.delete(p);
-    }
-    u.hash = '';
-    return u.toString();
-  } catch (e) {
-    // Kein gueltiger Link (z.B. Tippfehler des Nutzers) - dann lieber gar nichts protokollieren
-    // als einen unkontrollierten String.
-    return '';
-  }
-}
-
-// In welchem Land steht das Hotel? Booking verraet es im Pfad: /hotel/de/..., /hotel/th/...
-//
-// Warum das ins Log gehoert: Bisher laesst sich nur fragen "gewinnt Thailand ueberhaupt". Die
-// interessantere Frage ist "gewinnt Thailand bei THAILAENDISCHEN Hotels" - regionale Preisstufen
-// haengen vermutlich an der Lage der Unterkunft, nicht allein am Land der Sitzung. Ohne diese
-// Spalte wuerden wir Laender aussortieren, die nur nie ein passendes Hotel zu sehen bekamen.
-//
-// Kostet keine zusaetzliche Anfrage: Die Angabe steht im Link, den wir ohnehin haben.
-// Protokolliert wird das ISO-Kuerzel in Grossbuchstaben - dieselbe Schreibweise wie in
-// "Alle Laender", damit sich beide Spalten direkt vergleichen lassen.
-function hotelLandAusLink(link) {
-  try {
-    const treffer = new URL(link).pathname.match(/\/hotel\/([a-z]{2})\//i);
-    return treffer ? treffer[1].toUpperCase() : '';
-  } catch (e) {
-    return ''; // kein gueltiger Link - lieber leer als geraten
-  }
-}
-
-// Welche Landessitzung entspricht dem Standort des Hotels? Liefert '' , wenn wir es nicht
-// verlaesslich sagen koennen - dann laeuft die Suche wie bisher mit den 15 festen Laendern.
-function proxyLandFuerHotel(link) {
-  let land = hotelLandAusLink(link);
-  if (!land) return '';
-  land = HOTEL_LAND_ALIAS[land] || land;
-  land = HOTEL_LAND_MUTTERLAND[land] || land;
-  // Ohne bekannte Landeswaehrung keine Sitzung: siehe Kommentar an DEFAULT_CURRENCY_BY_COUNTRY.
-  return DEFAULT_CURRENCY_BY_COUNTRY[land] ? land : '';
-}
-
-// Die Laenderliste DIESER Suche: die 15 festen plus - falls noch nicht dabei - das Land der
-// Unterkunft selbst.
-//
-// Warum das noetig war: Die feste Liste ist eine WELTWEITE Stichprobe, sie passt sich dem Hotel
-// nie an. Fuer ein Hotel auf Réunion verglich sie die deutsche Sitzung gegen dreizehn
-// aussereuropaeische - und gegen keine einzige andere europaeische. Dabei lag genau dort der
-// Befund: Deutschland 125 EUR, alle dreizehn anderen 130,64 bis 131,25. Eine Kante von 4,8 %
-// zwischen EU-Sitzung und Rest der Welt, bei einem Hotel, das rechtlich in Frankreich liegt.
-// Welchen Preis die franzoesische Sitzung gezeigt haette, wissen wir nicht - wir haben nie gefragt.
-//
-// Kostet nur dann eine zusaetzliche Abfrage, wenn das Hotelland nicht ohnehin in der Liste steht.
-// Bei deutschen Hotels also gar nichts.
-function laenderFuerDieseSuche(link) {
-  const eigen = proxyLandFuerHotel(link);
-  if (!eigen || ALL_COUNTRIES.includes(eigen)) return ALL_COUNTRIES;
-  // Nach vorn, nicht ans Ende: Bei knappem Zeitbudget wird die Liste von hinten gekuerzt.
-  // Haengte man das Hotelland an, fiele ausgerechnet das interessanteste Land als Erstes weg.
-  return [ALL_COUNTRIES[0], eigen, ...ALL_COUNTRIES.slice(1)];
-}
-
-// Schreibt EINE Zeile pro Abfrage in die Google-Tabelle. Fehler werden verschluckt - das Logging
-// darf den Preis-Check niemals blockieren oder verzoegern.
-async function logQuery(entry) {
-  const url = process.env.LOG_WEBHOOK_URL;
-  if (!url) return;
-  try {
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 4000);
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: process.env.LOG_WEBHOOK_TOKEN || '', ...entry }),
-      signal: ctrl.signal,
-    });
-    clearTimeout(to);
-  } catch (e) { /* Logging ist optional - nie den Check gefaehrden */ }
-}
-
-// ---- Gesamtergebnis aus Einzelländern ableiten --------------------------------------------
-
-// Sicherheitsnetz gegen Waehrungs-Verwechslungen. Derselbe Aufenthalt kann von Land zu Land
-// ein paar Prozent kosten, aber niemals das Zehnfache. Weicht ein Landespreis so extrem vom
-// Ausgangspreis ab, ist nicht der Preis exotisch, sondern die Umrechnung kaputt (falsch
-// erkannte Waehrung, verrutschtes Tausendertrennzeichen). So etwas darf nicht in der Tabelle
-// landen - es macht das ganze Ergebnis unglaubwuerdig. Dann lieber "kein Preis ermittelt".
-const PLAUSIBLE_MAX_FACTOR = 10;
-const PLAUSIBLE_MIN_FACTOR = 0.1;
-function implausibleVsBaseline(priceEuro, basePriceEuro) {
-  if (priceEuro == null || basePriceEuro == null || basePriceEuro <= 0) return false;
-  const ratio = priceEuro / basePriceEuro;
-  return ratio > PLAUSIBLE_MAX_FACTOR || ratio < PLAUSIBLE_MIN_FACTOR;
-}
-
-function summarize(results, baselineCountry) {
-  // Erst aussortieren, dann auswerten: Ein unplausibler Wert wuerde sonst als "teuerstes Land"
-  // in der Tabelle stehen bleiben und Nutzer an den uebrigen Zahlen zweifeln lassen.
-  const baseRow = results.find((r) => r.country === baselineCountry);
-  const basePrice = baseRow && baseRow.priceEuro != null ? baseRow.priceEuro : null;
-  for (const r of results) {
-    if (r.country !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePrice)) {
-      console.log(`[summarize] ${r.country}: ${r.priceEuro} EUR gegen Basis ${basePrice} EUR ` +
-        `- unplausibel (${r.priceRaw} ${r.currency}), wird verworfen`);
-      r.priceEuro = null;
-      r.priceLocal = null;
-      r.priceRaw = 'Preis nicht verlässlich erkannt';
-      r.implausible = true;
-    }
-  }
-
-  const withPrice = results.filter((r) => r.priceEuro !== null);
-  if (!withPrice.length) {
-    // Die Diagnose des Ausgangslandes mitgeben (nur die ist aussagekraeftig: dort wurde die
-    // Seite in der Sprache und Waehrung geladen, die der Nutzer selbst sieht).
-    const baseDiag = (baseRow && baseRow.diagnose) || (results.find((r) => r.diagnose) || {}).diagnose || null;
-    return { success: false, reason: 'price_not_found', results, baselineCountry, diagnose: baseDiag };
-  }
-
-  const best = withPrice.reduce((a, b) => (b.priceEuro < a.priceEuro ? b : a));
-  const baseline = results.find((r) => r.country === baselineCountry);
-  let savingsPct = null;
-  let recommendVpnCountry = null;
-  if (baseline && baseline.priceEuro !== null && best.country !== baselineCountry) {
-    savingsPct = Math.round(((baseline.priceEuro - best.priceEuro) / baseline.priceEuro) * 1000) / 10;
-    if (savingsPct >= PROBE_CONFIDENCE_THRESHOLD_PCT) recommendVpnCountry = best.country;
-  }
-  // Nur ab RELEVANT_SAVINGS_PCT sprechen wir ueberhaupt von einem Unterschied.
-  const relevantSaving = savingsPct != null && savingsPct >= RELEVANT_SAVINGS_PCT;
-  return { success: true, results, best, savingsPct, relevantSaving, recommendVpnCountry, baselineCountry };
-}
-
-// ---- Alle Zimmernamen einer Hotelseite auflisten (fuer das Dropdown im Formular) ----------
-// Reine Text-Heuristik als Rueckfallebene. Bevorzugt wird die Zimmerliste aus dem DOM der
-// Zimmertabelle (siehe attemptFetch -> rooms), die ist deutlich sauberer.
-// Ein echter Zimmername enthaelt praktisch immer ein Unterkunfts-/Zimmertyp-Wort. Das ist ein viel
-// verlaesslicheres Signal als "steht neben einer Bett-Angabe" (dort landete sonst Ausstattung wie
-// "Ventilator" oder "Schrank", weil die Ausstattungsliste direkt neben den Betten steht).
-const ROOM_TYPE_RE = /(zimmer\b|\broom\b|suite|studio|apartment|appartement|bungalow|villa|chalet|cottage|penthouse|maisonette|schlafsaal|mehrbett|\bloft\b|\bzelt\b|\bcabin\b|\bdorm\b|deluxe|superior|standard|komfort|classic|\bking\b|\bqueen\b|\bdouble\b|\btwin\b|\bsingle\b)/i;
-// Zeilen, die KEIN Zimmername sein koennen (Verfuegbarkeits-, Preis-, Belegungs-, Options-Zeilen).
-const NOT_ROOM_RE = /m²|€|\$|\beur\b|usd|egp|cop|thb|inr|ars|try|lkr|vnd|idr|pkr|pen|mxn|php|jpy|inbegriffen|stornier|steuern|geb(ü|ue)hren|preis|gesamt|parkplatz|internet|wlan|frühstück|fruehstueck|zahlung|verf(ü|ue)gbar|wir haben noch|nur noch|belegung|erwachsen|g(ä|ae)ste|online|anzahl|abreise|anreise/i;
-
-function isRoomName(lines, idx) {
-  const l = (lines[idx] || '').trim();
-  // Auch hier war die alte Grenze (55) zu eng. Dass eine Zeile ein Zimmername ist, entscheiden
-  // die Pruefungen darunter (Zimmertyp-Wort vorhanden, keine Preis-/Belegungs-/Storno-Begriffe),
-  // nicht ihre Laenge.
-  if (l.length < 3 || l.length > ROOM_NAME_MAX_LEN) return false;
-  if (l.includes(':')) return false;                 // "Schlafzimmer 1: ...", "Bis 12:00"
-  if (/^\d/.test(l)) return false;                   // "1 Schlafsofa", "2 Einzelbetten und"
-  if (!ROOM_TYPE_RE.test(l)) return false;           // muss ein Zimmertyp-Wort enthalten
-  if (NOT_ROOM_RE.test(l)) return false;
-  // Frueher stand hier: Zeile enthaelt eine Ziffer UND ein Bett-Wort -> kein Zimmername.
-  // Die Regel sollte Zeilen wie "1 Schlafsofa" oder "2 Einzelbetten" aussortieren, hat aber
-  // viel zu breit gegriffen: "Villa mit 1 Schlafzimmer, Kingsize-Bett und Schlafsofa" ist ein
-  // voellig normaler Zimmername und flog ebenfalls raus. Die eigentlichen Bett-Zeilen faengt
-  // schon der Test oben ab (sie beginnen mit einer Ziffer oder enthalten einen Doppelpunkt)
-  // bzw. die Pflicht auf ein Zimmertyp-Wort.
-  return true;
-}
-
-function listRooms(bodyText) {
-  const lines = bodyText.split('\n').map((l) => l.trim()).filter(Boolean);
-  const rooms = [];
-  const seen = new Set();
-  for (let i = 0; i < lines.length; i++) {
-    if (isRoomName(lines, i)) {
-      const name = lines[i];
-      const key = name.toLowerCase();
-      if (!seen.has(key)) { seen.add(key); rooms.push(name); }
-    }
-  }
-  return rooms;
-}
-
-// Verpflegungs-/Storno-Tokens aus einem Textabschnitt bestimmen (identisch zur In-Page-Logik,
-// hier aber im Node-Kontext, damit wir die Optionen layout-unabhaengig direkt aus dem Seitentext
-// je Zimmer ableiten koennen - die DOM-Tabellenerkennung greift nicht auf allen Booking-Layouts).
-// Verpflegung ZEILENWEISE klassifizieren: Booking schreibt die Verpflegung je Tarif in EINE Zeile
-// ("Frühstück inbegriffen" / "Frühstück & Abendessen inbegriffen" = Halbpension / "Frühstück,
-// Mittagessen & Abendessen inbegriffen" = Vollpension). Nur so wird jeder Tarif korrekt getrennt.
-function boardOfLine(line) {
-  const l = (line || '').toLowerCase();
-  if (/all[-\s]?inclusive/.test(l)) return 'allinclusive';
-  if (/vollpension|mittagessen/.test(l)) return 'vollpension';
-  if (/halbpension|abendessen/.test(l)) return 'halbpension';
-  if (/fr(ü|ue)hst(ü|ue)ck/.test(l)) {
-    if (/inbegriffen|inklus/.test(l)) return 'fruehstueck';   // "Frühstück inbegriffen"
-    if (/€|eur|usd|\$|\d/.test(l)) return 'uebernachtung';     // "Frühstück € 23" = Aufpreis, NICHT inkl.
-    return 'fruehstueck';
-  }
-  if (/ohne (fr(ü|ue)hst(ü|ue)ck|mahlzeit)|nur (ü|ue)bernachtung|room only|ohne verpflegung/.test(l)) return 'uebernachtung';
-  return null;
-}
-// Storno ZEILENWEISE, und "nicht ..." VOR "kostenlos" pruefen - sonst matcht "Nicht kostenlos
-// stornierbar" faelschlich als kostenlos (der Teilstring "kostenlos stornierbar" steckt darin).
-function cancelOfLine(line) {
-  const l = (line || '').toLowerCase();
-  if (/nicht kostenlos stornierbar|nicht erstattbar|keine kostenlose stornierung/.test(l)) return 'nein';
-  if (/teilweise erstattbar/.test(l)) return 'teilweise';
-  if (/kostenlose stornierung|kostenlos stornierbar/.test(l)) return 'ja';
-  return null;
-}
-function boardsFromText(t) {
-  const set = new Set();
-  for (const line of (t || '').split('\n')) {
-    const b = boardOfLine(line);
-    if (b) set.add(b);
-  }
-  return [...set];
-}
-function cancelsFromText(t) {
-  const set = new Set();
-  for (const line of (t || '').split('\n')) {
-    const c = cancelOfLine(line);
-    if (c) set.add(c);
-  }
-  return [...set];
-}
-
-// Fuer jeden Zimmernamen den Textabschnitt vom ersten Vorkommen bis zum naechsten Zimmernamen
-// scannen und daraus Verpflegung/Storno bestimmen.
-function computeRoomOptions(bodyText, names) {
-  const lines = (bodyText || '').split('\n').map((l) => l.trim()).filter(Boolean);
-  const positions = names
-    .map((n) => {
-      const nl = n.toLowerCase();
-      const idx = lines.findIndex((l) => l.toLowerCase().includes(nl));
-      return { name: n, idx };
-    })
-    .filter((p) => p.idx >= 0)
-    .sort((a, b) => a.idx - b.idx);
-
-  // Gleiche Sicht wie die Preis-Erkennung: erst in Tarifstufen zerlegen, dann je Stufe
-  // bestimmen, was sie bietet. Frueher wurde der ganze Zimmerblock in einen Topf geworfen -
-  // damit war jede Stufe "Fruehstueck", sobald irgendeine Stufe Fruehstueck enthielt.
-  const boardOfCtx = (ctx) => {
-    for (const line of (ctx || '').split('\n')) { const b = boardOfLine(line); if (b) return b; }
-    return null;
-  };
-  const cancelOfCtx = (ctx) => {
-    for (const line of (ctx || '').split('\n')) { const c = cancelOfLine(line); if (c) return c; }
-    return null;
-  };
-
-  const result = {};
-  for (let i = 0; i < positions.length; i++) {
-    const start = positions[i].idx;
-    const end = i + 1 < positions.length ? positions[i + 1].idx : Math.min(lines.length, start + 60);
-    const stufen = tarifstufen(lines, start, end);
-    const boards = new Set();
-    const cancels = new Set();
-    for (const t of stufen) {
-      // Kein Verpflegungshinweis an einer Stufe MIT Preis heisst bei Booking "ohne Verpflegung".
-      // "Fruehstueck inbegriffen" wird hingeschrieben, wenn es inbegriffen ist - sonst steht da
-      // nichts. Wer nur sammelt, was dasteht, kann "Nur Uebernachtung" nie anbieten, obwohl es
-      // der haeufigste und oft guenstigste Tarif ist.
-      boards.add(boardOfCtx(t.ctx) || 'uebernachtung');
-      const c = cancelOfCtx(t.ctx);
-      if (c) cancels.add(c);
-    }
-    // Fallback fuer Zimmer ohne erkennbare Tarifstufen: wie bisher den ganzen Block ansehen,
-    // dann aber OHNE die Annahme "ohne Hinweis = Uebernachtung" (dafuer fehlt der Preisbezug).
-    if (!stufen.length) {
-      const span = lines.slice(start, end).join('\n');
-      for (const b of boardsFromText(span)) boards.add(b);
-      for (const c of cancelsFromText(span)) cancels.add(c);
-    }
-    result[positions[i].name] = { boards: [...boards], cancels: [...cancels] };
-  }
-  return result;
-}
-
-// Fehlende Verpflegungs-/Storno-Optionen (z.B. wenn nur die Namen aus dem DOM kamen) aus dem
-// Seitentext ergaenzen. DOM-Werte haben Vorrang, sind aber oft leer.
-function enrichRoomOptions(bodyText, rooms) {
-  if (!bodyText || !rooms.length) return rooms;
-  const opts = computeRoomOptions(bodyText, rooms.map((r) => r.name));
-  return rooms.map((r) => {
-    const c = opts[r.name] || { boards: [], cancels: [] };
-    // Text-Erkennung (zeilenweise) hat Vorrang - sie ist am genauesten; DOM nur als Rueckfall.
-    return {
-      name: r.name,
-      boards: c.boards.length ? c.boards : (r.boards || []),
-      cancels: c.cancels.length ? c.cancels : (r.cancels || []),
-    };
-  });
-}
-
-// ---- HTTP Handler ------------------------------------------------------------------------
 
 module.exports = async (req, res) => {
   const startTime = Date.now();
-  res.setHeader('Access-Control-Allow-Origin', 'https://georates.tech');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  setCors(res, 'POST, OPTIONS');
 
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ success: false, reason: 'method_not_allowed' }); return; }
 
-  const { link, room, board, cancel, mode, turnstileToken } = req.body || {};
+  const body = req.body || {};
+  const { mode, turnstileToken } = body;
+  const debug = debugErlaubt(req);
+  const remoteIp = clientIp(req);
 
   // ---- Streaming ---------------------------------------------------------------------------
   // Ein vollstaendiger Laendervergleich dauert etwa eine Minute. Frueher schwieg der Server
@@ -1399,7 +88,7 @@ module.exports = async (req, res) => {
   // Wichtig: Turnstile-Pruefung, Vergleichslogik und Logging bleiben hier im Server. Die
   // Alternative (mehrere parallele Requests aus dem Browser) haette genau das in den Client
   // verlagert, wo es manipulierbar waere.
-  const wantsStream = !!(req.body && req.body.stream) && mode !== 'rooms';
+  const wantsStream = !!body.stream && mode !== 'rooms';
   let streamOpen = false;
   const streamSend = (obj) => {
     if (!streamOpen) return;
@@ -1427,36 +116,46 @@ module.exports = async (req, res) => {
     }
   };
 
+  const eingabe = eingabenPruefen(body);
+
+  // Bot-Check fuer BEIDE Modi. Der Zimmer-Abruf lief bisher ohne Turnstile, weil er "leicht" ist -
+  // er loest aber genauso echten Proxy-Traffic aus und war damit der billigste Weg, Guthaben zu
+  // verbrennen. Ohne konfigurierten Key wird der Check uebersprungen (verifyTurnstile).
+  const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
+  if (!humanOk) {
+    if (mode === 'rooms') { res.status(403).json({ success: false, reason: 'bot_check_failed' }); return; }
+    respond(403, { success: false, reason: 'bot_check_failed' });
+    return;
+  }
+
   // Modus "rooms": nur die Zimmerliste des Hotels laden (fuer das Auswahl-Dropdown im Formular).
-  // Ein einziger Seitenabruf ueber das Ausgangsland, kein Laendervergleich. Kein Turnstile noetig
-  // (leichter, seltener Abruf), aber weiterhin Proxy-/Link-Pruefung.
+  // Ein einziger Seitenabruf ueber das Ausgangsland, kein Laendervergleich.
   if (mode === 'rooms') {
-    if (!link || !/^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i.test(link)) {
-      res.status(400).json({ success: false, reason: 'invalid_link' });
-      return;
-    }
-    const roomsIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (await rateLimitUeberschritten('rooms', roomsIp, ROOMS_RATE_LIMIT, ROOMS_RATE_WINDOW_SECONDS)) {
+    if (eingabe.fehler === 'invalid_link') { res.status(400).json({ success: false, reason: 'invalid_link' }); return; }
+    if (await store.rateLimitUeberschritten('rooms', remoteIp, store.ROOMS_RATE_LIMIT, store.RATE_WINDOW_SECONDS)) {
       res.status(429).json({ success: false, reason: 'rate_limited' });
       return;
     }
+    if (await store.tagesdeckelErreicht()) { res.status(200).json({ success: false, reason: 'daily_budget_reached' }); return; }
     const up = process.env.SMARTPROXY_USER_PREFIX;
     const pw = process.env.SMARTPROXY_PASSWORD;
     const srv = process.env.SMARTPROXY_SERVER || 'http://proxy.smartproxy.net:3120';
     if (!up || !pw) { res.status(200).json({ success: false, reason: 'proxy_not_configured' }); return; }
+    const link = eingabe.link;
+    let bytes = 0;
     try {
-      try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
-      const baselineCountry = detectBaselineCountry(link);
+      await browser.chromiumVorbereiten();
+      const baselineCountry = cfg.detectBaselineCountry(link);
       // Reihenfolge beachten: erst Baseline aus dem Originallink lesen, dann auf Deutsch zwingen.
-      const abrufLink = normalisiereLinkFuerAbruf(link);
+      const abrufLink = cfg.normalisiereLinkFuerAbruf(link);
 
       // Zimmer zuerst aus den DOM-Links der Zimmertabelle nehmen (r.rooms, inkl. Verpflegungs-/
       // Storno-Optionen); nur wenn leer, faellt es auf die Text-Heuristik (nur Namen) zurueck.
       const roomsFrom = (r) => {
         const base = r.rooms && r.rooms.length
           ? r.rooms
-          : listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] }));
-        return enrichRoomOptions(r.bodyText || '', base);
+          : parser.listRooms(r.bodyText || '').map((name) => ({ name, boards: [], cancels: [] }));
+        return parser.enrichRoomOptions(r.bodyText || '', base);
       };
       const hasOpts = (rl) => rl.some((x) => (x.boards && x.boards.length) || (x.cancels && x.cancels.length));
 
@@ -1468,18 +167,15 @@ module.exports = async (req, res) => {
       //    Booking die Tarifzeilen mit Verpflegung/Storno. Ein Datacenter-Direktabruf bekommt zwar
       //    die Zimmernamen, aber keine Optionen - daher hier Proxy zuerst.
       const proxyAuth = { username: `${up}${baselineCountry}`, password: pw };
-      // Alle folgenden Schalter sind Messwerkzeuge und nur mit gueltigem Debug-Header aktiv
-      // (siehe debugErlaubt). Ohne ihn verhaelt sich der Endpunkt wie fuer normale Besucher.
-      const darfMessen = debugErlaubt(req);
-      // Messmodus: Mit noScripts:true laesst sich derselbe Abruf einmal mit und einmal ohne
-      // Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu vergleichen.
-      const blockScripts = darfMessen && !!(req.body && req.body.noScripts);
-      // Geraeteprofil: windows (Default), mac, android, iphone. Hier durchgereicht, damit sich
-      // die Zimmerliste eines Geraets einzeln pruefen laesst - das ist der billigste Weg zu
-      // sehen, ob der Parser die mobile Seitenstruktur ueberhaupt versteht.
-      const device = resolveDevice(darfMessen ? (req.body && req.body.device) : null, darfMessen && !!(req.body && req.body.debug));
+      // Messmodus (nur mit Debug-Secret): Mit noScripts:true laesst sich derselbe Abruf einmal mit
+      // und einmal ohne Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu
+      // vergleichen. Geraeteprofile ebenso - der billigste Weg zu sehen, ob der Parser die
+      // mobile Seitenstruktur ueberhaupt versteht.
+      const blockScripts = debug && !!body.noScripts;
+      const device = browser.resolveDevice(debug ? body.device : null, debug);
       for (let a = 1; a <= 2 && !withOpts; a++) {
-        const r = await attemptFetch(abrufLink, srv, proxyAuth, blockScripts, device);
+        const r = await browser.attemptFetch(abrufLink, srv, proxyAuth, blockScripts, device);
+        bytes += r.transferBytes || 0;
         lastR = r;
         if (r.loadedOk) {
           const rl = roomsFrom(r);
@@ -1488,19 +184,20 @@ module.exports = async (req, res) => {
       }
       // 2) Falls der Proxy gar nichts brachte: kostenloser Direktabruf, wenigstens fuer die Namen.
       if (!withOpts && !namesOnly) {
-        const r = await attemptFetch(abrufLink, null, null, blockScripts, device);
+        const r = await browser.attemptFetch(abrufLink, null, null, blockScripts, device);
         lastR = r;
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
       const rooms = withOpts || namesOnly;
+      await store.tagesstatistikSchreiben({ erfolg: !!rooms, fund: false, bytes });
       if (!rooms) {
         const failPayload = { success: false, reason: 'rooms_not_loaded' };
-        if (darfMessen && req.body && req.body.debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
+        if (debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
         res.status(200).json(failPayload);
         return;
       }
       const payload = { success: true, rooms, baselineCountry };
-      if (darfMessen && req.body && req.body.debug && lastR) {
+      if (debug && lastR) {
         payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk, transferKB: Math.round((lastR.transferBytes || 0) / 1024) };
         // Diagnose: die echte Preis-Erkennung gegen den vom Server geladenen Seitentext testen.
         try {
@@ -1508,22 +205,24 @@ module.exports = async (req, res) => {
           const ls = bt.split('\n').map((l) => l.trim()).filter(Boolean);
           payload.dbg.lineCount = ls.length;
           payload.dbg.minLines = MIN_LOADED_LINES;
-          const rn = (rooms && rooms[0] && rooms[0].name) || '';
+          // debugRoom: den Ausschnitt an einem gewaehlten Zimmer verankern statt an rooms[0]
+          // (OFFEN.md, Punkt 2 - dort war genau das der fehlende Handgriff).
+          const rn = String(body.debugRoom || (rooms && rooms[0] && rooms[0].name) || '');
           const idx = ls.findIndex((l) => l.toLowerCase().startsWith(rn.toLowerCase()));
-          const [amt] = rn ? findRoomPrice(bt, rn, '', '') : [null];
+          const [amt] = rn ? parser.findRoomPrice(bt, rn, '', '') : [null];
           // Fensterbreite einstellbar (debugLines): 22 Zeilen reichen, um den ersten Preis zu
           // sehen, aber nicht, um die Tarifstufen eines Zimmers nachzuvollziehen - genau die
           // braucht man aber, wenn die Verpflegungs-Optionen unvollstaendig sind.
-          const fenster = Math.min(Math.max(parseInt(req.body.debugLines, 10) || 22, 5), 160);
+          const fenster = Math.min(Math.max(parseInt(body.debugLines, 10) || 22, 5), 160);
           payload.dbg.probe = { room: rn, roomLineIdx: idx, amount: amt, snippet: idx >= 0 ? ls.slice(idx, idx + fenster) : [] };
           // Mit debug:'price' den ECHTEN Preis-Pfad fuers Ausgangsland durchlaufen lassen.
-          if (req.body.debug === 'price' && rn) { // darfMessen gilt bereits durch den umschliessenden Block
+          if (body.debug === 'price' && rn) {
             // Ohne zweiten Browserstart: die Preis-Kette auf dem BEREITS geladenen Seitentext pruefen.
-            const rr = await getLiveRates();
-            const useRoom = req.body.room || rn;
-            const [amt2, , curTok] = findRoomPrice(bt, useRoom, req.body.board || '', req.body.cancel || '');
-            const cur = normalizeCurrency(curTok, DEFAULT_CURRENCY_BY_COUNTRY[baselineCountry] || 'EUR');
-            const val = parseAmount(amt2);
+            const rr = await browser.getLiveRates();
+            const useRoom = body.room || rn;
+            const [amt2, , curTok] = parser.findRoomPrice(bt, useRoom, body.board || '', body.cancel || '');
+            const cur = parser.normalizeCurrency(curTok, DEFAULT_CURRENCY_BY_COUNTRY[baselineCountry] || 'EUR');
+            const val = parser.parseAmount(amt2);
             const rate = rr && rr[cur];
             payload.dbg.pricePath = {
               ratesOk: !!rr, room: useRoom, rawAmount: amt2, currencyToken: curTok, currency: cur,
@@ -1535,33 +234,24 @@ module.exports = async (req, res) => {
       }
       res.status(200).json(payload);
     } catch (err) {
-      res.status(200).json({ success: false, reason: 'error', message: String((err && err.message) || err) });
+      res.status(200).json(fehlerAntwort(err));
+    } finally {
+      await browser.sharedBrowserSchliessen();
     }
     return;
   }
 
-  const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
-  if (!humanOk) {
-    respond(403, { success: false, reason: 'bot_check_failed' });
-    return;
-  }
-
-  // Bot-Check bestanden heisst nicht "beliebig oft". Die Bremse pro IP greift vor allem gegen
-  // die Schleife eines Einzelnen; sie liegt hoch genug, dass normales Ausprobieren nicht anstoesst.
-  if (await rateLimitUeberschritten('preis', remoteIp, PRICE_RATE_LIMIT, PRICE_RATE_WINDOW_SECONDS)) {
-    respond(429, { success: false, reason: 'rate_limited' });
-    return;
-  }
+  // ---- Preis-Check -------------------------------------------------------------------------
 
   // Herkunftsland des Besuchers (setzt Vercel am Edge). Nur das Laenderkuerzel, keine IP.
   const visitorCountry = String(req.headers['x-vercel-ip-country'] || '').toUpperCase();
   const herkunftsland = LOG_COUNTRY_LABEL[visitorCountry] || visitorCountry || 'unbekannt';
+  const { link, room, board, cancel } = eingabe.fehler ? { link: String(body.link || '').slice(0, MAX_LINK_LEN), room: '', board: '', cancel: '' } : eingabe;
 
   // Jede Abfrage protokollieren - auch die erfolglosen. Die zeigen Traffic und belegen, dass die
   // Seite benutzt wird; ausserdem sieht man an den Status-Werten sofort, wo es klemmt.
-  const logAttempt = (status, extra) => logQuery({
-    hotelLink: linkFuersLog(link),
+  const logAttempt = (status, extra) => store.logQuery({
+    hotelLink: cfg.linkFuersLog(link),
     room: room || '',
     board: LOG_BOARD_LABEL[board] || board || '',
     cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
@@ -1576,13 +266,13 @@ module.exports = async (req, res) => {
     relevant: 'nein',
     empfehlung: 'nein',
     status,
-    hotelLand: hotelLandAusLink(link),
+    hotelLand: cfg.hotelLandAusLink(link),
     ...(extra || {}),
   });
 
-  if (!link || !/^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i.test(link)) {
-    await logAttempt('kein gültiger Booking-Link');
-    respond(400, { success: false, reason: 'invalid_link' });
+  if (eingabe.fehler) {
+    await logAttempt(eingabe.fehler === 'invalid_link' ? 'kein gültiger Booking-Link' : `ungültige Eingabe (${eingabe.fehler})`);
+    respond(400, { success: false, reason: eingabe.fehler });
     return;
   }
   if (!room) {
@@ -1591,13 +281,17 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // Auch hier ist die freie Geraetewahl ein Messwerkzeug: Sie veraendert das Ergebnis UND den
-  // Cache-Schluessel, ein Fremder koennte damit am Cache vorbei immer neue Abrufe ausloesen.
-  // Ohne Debug-Header gilt deshalb das Standardprofil. Einmal berechnet und unten
-  // weiterverwendet, damit Schluessel und tatsaechlicher Lauf nicht auseinanderlaufen koennen.
-  const geraet = resolveDevice(debugErlaubt(req) ? (req.body && req.body.device) : null, false);
-  const cacheKey = cacheKeyFor(link, room, board || '', cancel || '', geraet);
-  const cached = await cacheGet(cacheKey);
+  // Die freie Geraetewahl ist ein Messwerkzeug: Sie veraendert das Ergebnis UND den Cache-Schluessel,
+  // ein Fremder koennte damit am Cache vorbei immer neue Abrufe ausloesen. Ohne Debug-Header gilt
+  // deshalb das Standardprofil (Entscheidung vom 20.09.).
+  const device = browser.resolveDevice(debug ? body.device : null, false);
+  const baselineCountry = cfg.detectBaselineCountry(link);
+  // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft, optional vom
+  // Nutzer eingeschraenkt.
+  const laender = cfg.laenderFuerDieseSuche(link, eingabe.countries, baselineCountry);
+  const cacheKey = store.cacheKeyFor(link, room, board, cancel, device, laender);
+  const resultId = store.resultIdFor(cacheKey);
+  const cached = await store.cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
     // Aus dem Cache liegt alles sofort vor. Im Stream-Modus schicken wir die Laenderzeilen
@@ -1607,14 +301,19 @@ module.exports = async (req, res) => {
       streamSend({ type: 'meta', baselineCountry: cached.baselineCountry, fromCache: true, totalCountries: (cached.results || []).length });
       (cached.results || []).forEach((r) => streamSend({ type: 'country', result: r }));
     }
-    respond(200, { ...cached, fromCache: true });
+    respond(200, { ...cached, fromCache: true, resultId });
     return;
   }
 
-  // Ab hier laufen gleich echte Proxy-Abrufe. Erst jetzt zaehlt die Suche aufs Tagesbudget -
-  // alles davor (Cache-Treffer, ungueltiger Link, fehlendes Zimmer) hat nichts gekostet.
-  if (await tagesbudgetAufgebraucht()) {
-    await logAttempt('Tagesbudget aufgebraucht');
+  // Erst NACH dem Cache bremsen: eine Antwort aus dem Cache kostet nichts und soll niemanden
+  // ausbremsen, der dasselbe Ergebnis zweimal ansieht.
+  if (await store.rateLimitUeberschritten('price', remoteIp, store.PRICE_RATE_LIMIT, store.RATE_WINDOW_SECONDS)) {
+    await logAttempt('Zählbremse (IP)');
+    respond(429, { success: false, reason: 'rate_limited' });
+    return;
+  }
+  if (await store.tagesdeckelErreicht()) {
+    await logAttempt('Tagesdeckel erreicht');
     respond(200, { success: false, reason: 'daily_budget_reached' });
     return;
   }
@@ -1627,44 +326,37 @@ module.exports = async (req, res) => {
     return;
   }
 
+  let results = [];
   try {
     // Verlaessliche Live-Wechselkurse sind Pflicht - ohne sie waere der Laendervergleich
     // wertlos. Sind beide Quellen nicht erreichbar, brechen wir sauber ab.
-    const rates = await getLiveRates();
+    const rates = await browser.getLiveRates();
     if (!rates) {
       await logAttempt('Wechselkurse nicht erreichbar');
       respond(200, { success: false, reason: 'fx_unavailable' });
       return;
     }
 
-    // Chromium EINMAL vorab entpacken. Danach koennen mehrere Browser gefahrlos gleichzeitig
-    // starten (kein spawn ETXTBSY / libnss3.so-Race mehr) - so laeuft auch die Probe parallel.
-    try { await chromium.executablePath(CHROMIUM_PACK_URL); } catch (e) { /* Fehler taucht beim Launch erneut auf */ }
+    await browser.chromiumVorbereiten();
 
-    // Ausgangsland (Referenzpreis) aus dem Booking-Link ableiten - nicht zwingend Deutschland.
-    const baselineCountry = detectBaselineCountry(link);
     // Erst danach den Link fuer den Abruf auf Deutsch zwingen (Parser ist deutschsprachig).
     // `link` bleibt unveraendert: er wird weiter fuers Log und fuer die Antwort gebraucht.
-    const abrufLink = normalisiereLinkFuerAbruf(link);
-
+    const abrufLink = cfg.normalisiereLinkFuerAbruf(link);
     // Geraeteprofil gilt fuer ALLE Laender derselben Abfrage. Sonst waere der Vergleich wertlos:
     // Wir wollen den Laendereffekt messen, nicht Land gegen Geraet.
-    const device = geraet; // oben bereits aufgeloest, siehe Kommentar beim Cache-Schluessel
-    const deviceLabel = deviceProfile(device).label;
+    const deviceLabel = browser.deviceProfile(device).label;
 
-    // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft.
-    const laender = laenderFuerDieseSuche(link);
     if (laender !== ALL_COUNTRIES) {
-      console.log(`[check-price] Hotelland ${laender[1]} zusaetzlich geprueft (${laender.length} Laender)`);
+      console.log(`[check-price] Laenderliste dieser Suche: ${laender.join(',')} (${laender.length})`);
     }
 
     // Probe: Ausgangsland + Guenstig-Kandidat (Kolumbien) PARALLEL, je 2 Versuche (Genauigkeit).
     const probeCountries = [baselineCountry];
-    if (!probeCountries.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
+    if (!probeCountries.includes(CHEAP_PROBE_COUNTRY) && laender.includes(CHEAP_PROBE_COUNTRY)) probeCountries.push(CHEAP_PROBE_COUNTRY);
 
     if (wantsStream) {
       openStream();
-      streamSend({ type: 'meta', baselineCountry, totalCountries: laender.length });
+      streamSend({ type: 'meta', baselineCountry, totalCountries: laender.length, resultId });
     }
     // Im Stream-Modus geht jedes Land raus, SOBALD es fertig ist - nicht erst, wenn die ganze
     // Gruppe durch ist. Deshalb haengt der Versand am einzelnen Promise, nicht am Promise.all.
@@ -1674,9 +366,9 @@ module.exports = async (req, res) => {
     // als wuerde das Tool raten.
     let basePriceForGuard = null;
     const fetchAndStream = (c, attempts) =>
-      fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
+      browser.fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
         .then((r) => {
-          if (c !== baselineCountry && implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
+          if (c !== baselineCountry && parser.implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
             r.priceEuro = null;
             r.priceLocal = null;
             r.priceRaw = 'Preis nicht verlässlich erkannt';
@@ -1689,7 +381,7 @@ module.exports = async (req, res) => {
           return r;
         });
 
-    let results = await Promise.all(probeCountries.map((c) => fetchAndStream(c, MAX_ATTEMPTS)));
+    results = await Promise.all(probeCountries.map((c) => fetchAndStream(c, MAX_ATTEMPTS)));
     // Ab hier kennen wir den Referenzpreis - alle folgenden Laender laufen durch die Pruefung.
     const probeBase = results.find((r) => r.country === baselineCountry);
     basePriceForGuard = probeBase && probeBase.priceEuro != null ? probeBase.priceEuro : null;
@@ -1697,7 +389,7 @@ module.exports = async (req, res) => {
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
-    let summary = summarize(results, baselineCountry);
+    let summary = parser.summarize(results, baselineCountry);
     let partial = false;
 
     // Hier wurde die Suche frueher abgebrochen, sobald Kolumbien mindestens 10% guenstiger war
@@ -1744,22 +436,31 @@ module.exports = async (req, res) => {
         // Ausreisser die Planung dauerhaft nach oben und wir pruefen weniger Laender als moeglich.
         batchEstimateMs = Math.round((Date.now() - batchStart) * BATCH_ESTIMATE_SAFETY);
       }
-      summary = summarize(results, baselineCountry);
+      summary = parser.summarize(results, baselineCountry);
     }
 
     // Die Zimmerliste haengt jetzt einmal an summary.diagnose; an den einzelnen Laendern
     // waere sie nur Ballast in der Antwort (und im Cache).
     for (const r of results) delete r.diagnose;
 
-    const payload = { ...summary, partial };
+    const bytesGesamt = results.reduce((s, r) => s + (r.transferBytes || 0), 0);
+    const payload = { ...summary, partial, resultId, countries: laender };
     if (summary.success) {
-      await cacheSet(cacheKey, summary);
+      await store.cacheSet(cacheKey, { ...summary, partial, countries: laender });
+      // Permalink: dasselbe Ergebnis ohne Link und ohne Zimmername-Freitext, aber mit dem, was
+      // ein Empfaenger zum Einordnen braucht (Hotelname, Hotelland, Zimmer, Verpflegung).
+      await store.resultSpeichern(resultId, {
+        ...summary, partial, countries: laender,
+        hotelName: cfg.hotelNameAusLink(link), hotelLand: cfg.hotelLandAusLink(link),
+        room, board, cancel, device: deviceLabel, datum: new Date().toISOString().slice(0, 10),
+      });
       // Jede (neue) erfolgreiche Abfrage in die Google-Tabelle loggen - als Deal-Sammlung.
       const baseRow = results.find((r) => r.country === baselineCountry);
       const best = summary.best;
       const basePrice = baseRow && baseRow.priceEuro != null ? baseRow.priceEuro : null;
-      await logQuery({
-        hotelLink: linkFuersLog(link),
+      const ersparnisEuro = basePrice != null && best.priceEuro != null ? Math.round((basePrice - best.priceEuro) * 100) / 100 : null;
+      await store.logQuery({
+        hotelLink: cfg.linkFuersLog(link),
         room: room || '',
         board: LOG_BOARD_LABEL[board] || board || '',
         cancel: LOG_CANCEL_LABEL[cancel] || cancel || '',
@@ -1769,14 +470,14 @@ module.exports = async (req, res) => {
         bestPreisEuro: best.priceEuro != null ? best.priceEuro : '',
         bestPreisVorOrt: best.priceLocal != null ? `${best.priceLocal} ${best.currency}` : '',
         ersparnisProzent: summary.savingsPct != null ? summary.savingsPct : '',
-        ersparnisEuro: basePrice != null && best.priceEuro != null ? Math.round((basePrice - best.priceEuro) * 100) / 100 : '',
+        ersparnisEuro: ersparnisEuro != null ? ersparnisEuro : '',
         // "ja" nur bei einem Unterschied, der kein Rundungsrauschen ist - so laesst sich die
         // Tabelle nach echten Funden filtern, statt 0,1-%-Treffer mitzuzaehlen.
         relevant: summary.relevantSaving ? 'ja' : 'nein',
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
-        alleLaender: alleLaenderFuersLog(results, laender),
-        hotelLand: hotelLandAusLink(link),
+        alleLaender: cfg.alleLaenderFuersLog(results, laender),
+        hotelLand: cfg.hotelLandAusLink(link),
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
         // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
@@ -1785,8 +486,18 @@ module.exports = async (req, res) => {
         // Mobil-Messungen in der Tabelle spaeter nicht mehr auseinanderhalten.
         status: (partial ? `ok (nur ${results.length} von ${laender.length} Ländern – Zeitlimit)` : 'ok')
           + ` · ${deviceLabel}`
-          + ` · ${Math.round(results.reduce((s, r) => s + (r.transferBytes || 0), 0) / (1024 * 1024))} MB`,
+          + ` · ${Math.round(bytesGesamt / (1024 * 1024))} MB`
+          + (laender.length < ALL_COUNTRIES.length ? ' · Länderauswahl' : ''),
       });
+      // Best-of nur bei echten Funden und nur anonymisiert (siehe lib/store.js).
+      if (summary.relevantSaving && basePrice != null && ersparnisEuro != null) {
+        await store.bestofSpeichern({
+          hotel: cfg.hotelNameAusLink(link), hotelLand: cfg.hotelLandAusLink(link),
+          land: best.country, baseline: baselineCountry,
+          pct: summary.savingsPct, euro: ersparnisEuro, basisEuro: basePrice,
+          umgerechnet: !!summary.convertedCurrency, datum: new Date().toISOString().slice(0, 10), resultId,
+        });
+      }
     } else {
       // Im Log festhalten, ob der Link Reisedaten enthielt. Ohne checkin/checkout sucht Booking
       // sich selbst einen Termin und zeigt haeufig gar keine Zimmertabelle - das war am 17.09.
@@ -1796,9 +507,15 @@ module.exports = async (req, res) => {
       await logAttempt(hatDatum ? 'kein Preis gefunden' : 'kein Preis gefunden (Link ohne Reisedaten)',
         { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
+    await store.tagesstatistikSchreiben({ erfolg: summary.success, fund: !!summary.relevantSaving, bytes: bytesGesamt });
     respond(200, payload);
   } catch (err) {
-    try { await logAttempt('Fehler: ' + String((err && err.message) || err).slice(0, 120)); } catch (e) { /* Logging ist optional */ }
-    respond(200, { success: false, reason: 'error', message: String((err && err.message) || err) });
+    try {
+      await logAttempt('Fehler: ' + String((err && err.message) || err).slice(0, 120));
+      await store.tagesstatistikSchreiben({ erfolg: false, fund: false, bytes: results.reduce((s, r) => s + (r.transferBytes || 0), 0) });
+    } catch (e) { /* Logging ist optional */ }
+    respond(200, fehlerAntwort(err));
+  } finally {
+    await browser.sharedBrowserSchliessen();
   }
 };

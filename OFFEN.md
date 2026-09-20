@@ -1,6 +1,6 @@
 # Offene Punkte
 
-Stand: 20.09.2026. Reihenfolge = Wichtigkeit.
+Stand: 20.09.2026 (nach dem Audit). Reihenfolge = Wichtigkeit.
 
 ## 1. Alte Proxy-Kennung steht in der Git-Historie
 
@@ -45,8 +45,14 @@ Zwei Reparaturen:
 - **Richtig:** Bookings eigene Zeile „In der Waehrung der Unterkunft: € X" auslesen statt
   selbst umzurechnen. Ungeprueft ist, ob diese Zeile auch auf der Zimmerliste steht oder
   nur im Buchungsvorgang.
-- **Schnell und sicher:** Musste fuer ein Land umgerechnet werden, gilt die 1-%-Schwelle
-  nicht. Dann erst ab ca. 3 % als Fund melden.
+- **Schnell und sicher (umgesetzt, Audit):** Musste fuer ein Land umgerechnet werden,
+  gilt die 1-%-Schwelle nicht, sondern 3 % (`RELEVANT_SAVINGS_PCT_CONVERTED`). Die Antwort traegt
+  `relevantThresholdPct` und `convertedCurrency`, das Frontend nennt die angewandte Schwelle.
+- **Zu pruefen:** `selected_currency` in allen Sitzungen auf die Waehrung des Hotellandes setzen
+  (aus `DEFAULT_CURRENCY_BY_COUNTRY` bekannt). Dann zeigen alle Sitzungen dieselbe Waehrung, es
+  gibt nichts mehr umzurechnen, und genau in dieser Waehrung sollte laut Punkt 6 ohnehin gezahlt
+  werden. Nachteil: Die Spalte "Preis vor Ort" taugt dann nicht mehr zur VPN-Kontrolle. Braucht
+  einen Live-Vergleich an zwei, drei Hotels, bevor es umgestellt wird.
 
 Nicht betroffen sind Funde, bei denen Booking selbst Euro ausgewiesen hat — z. B. Emanuel
 Derag Muenchen (477,40 € gegen 423,86 € ueber Japan, per VPN bis in die Buchungsmaske
@@ -65,8 +71,13 @@ Die Position im ausgelesenen Text ist also nicht stabil. Die Grundannahme des Pa
 — Ueberschrift, darunter die Tarifzeilen, bis zur naechsten Ueberschrift — bricht hier.
 
 Naechster Schritt: einmal den vollstaendigen Seitentext dieses Hotels dumpen und nachsehen,
-wo die Zeilen dieser Karte wirklich liegen. Dafuer waere ein `debugRoom`-Parameter
-hilfreich, der den Ausschnitt an einem gewaehlten Zimmer verankert statt an rooms[0].
+wo die Zeilen dieser Karte wirklich liegen. Der `debugRoom`-Parameter dafuer existiert seit dem
+Audit (Modus `rooms`, Header `X-GeoRates-Debug`, `debugLines` bis 160).
+
+Strukturell: Der Parser arbeitet auf `innerText`, dessen Zeilenreihenfolge nicht stabil ist. Die
+Zimmerliste kommt bereits aus dem DOM der Zimmertabelle (attemptFetch, Strategie 1). Den Preis pro
+Tabellenzeile am selben Ort zu greifen, waere die Loesung, die nicht von der Textreihenfolge
+abhaengt - und nebenbei sprachunabhaengig.
 
 Die Fehlermeldung nennt seit dem 19.09. keinen erfundenen Grund mehr, der Fehler selbst
 ist offen.
@@ -100,7 +111,7 @@ Laender Preise haben, fehlt vermutlich der Proxy.
 Nach ein paar Tagen auszaehlen, welche Laender systematisch leer bleiben, und die entweder aus
 DEFAULT_CURRENCY_BY_COUNTRY streichen oder aufs Mutterland umbiegen.
 
-## 6. Waehrungshinweis in der Ergebnisanzeige
+## 6. Waehrungshinweis in der Ergebnisanzeige (umgesetzt, Audit)
 
 Booking bietet an, in der Waehrung der Landessitzung abzurechnen. Gemessen am 18.09.:
 423,86 € gegen 77.720 JPY, letzteres zum Tageskurs rund sieben Euro teurer. Das frisst
@@ -109,11 +120,15 @@ berechnet.
 
 In der Ergebnisanzeige steht bisher nur „Karte ohne Fremdwaehrungsgebuehr" — das zielt auf
 die Bankgebuehr, nicht auf Bookings Umrechnung. Ergaenzen: immer in der Waehrung der
-Unterkunft zahlen, nie in der angebotenen.
+Unterkunft zahlen, nie in der angebotenen. -> Steht seit dem Audit als eigener Schritt in der
+Buchungsanleitung des Ergebnisses.
 
-## 7. „Best of" auf der Startseite
+## 7. „Best of" auf der Startseite (umgesetzt, Audit)
 
-Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
+`/api/best-of` liefert die groessten Funde der letzten 45 Tage, pro Hotel der beste. Gespeichert
+wird bei jedem relevanten Fund ein anonymisierter Eintrag in Upstash (Hotelname aus dem Slug,
+Hotelland, Siegerland, Prozent, Euro, Messtag). Die Datenschutzerklaerung nennt den Zweck.
+Urspruengliche Bedingungen, alle eingehalten:
 
 - Nur Messungen ab dem 18.09.2026 — davor verzerren Kolumbien-Abbruch, falsche Tarifzeile
   und Genius die Zahlen.
@@ -135,9 +150,33 @@ eine andere Rate als der Direkteinstieg? Waere mit dem vorhandenen Aufbau messba
 Referrer gesetzt werden kann. Relevant, bevor jemals ein Affiliate-Link dazukommt — der
 wuerde sonst die eigenen Messungen verzerren.
 
+## 10. Gemeinsamer Browser statt ein Chromium je Land
+
+Umgesetzt hinter `BROWSER_SHARED=1` (lib/browser.js), aber nicht live gemessen. Erwartung: zwei
+bis vier Sekunden weniger je Land und weniger RAM, dadurch mehr Laender innerhalb der 180 s.
+Einschalten, eine Handvoll Suchen fahren, Spalte Q und Status-MB vergleichen, dann entscheiden.
+
 ---
 
 ## Geklaert, nicht mehr offen
+
+- **Aufteilung in Module** (Audit): `lib/config`, `lib/parser`, `lib/browser`, `lib/store`,
+  `lib/http`; Tests importieren normal statt per Regex. Neuer Handler-Ablauftest mit
+  Browser-Stub, GitHub Action, exakte Versionen plus package-lock.json.
+- **Turnstile auch fuer den Zimmer-Abruf** (Audit). Der lief ohne Bot-Check, loeste aber
+  denselben Proxy-Traffic aus. Das Frontend schickt den Token mit und setzt das Widget danach
+  zurueck.
+- **Tagesdeckel zusaetzlich in Megabyte** (Audit, `DAILY_MB_LIMIT`, Standard 4000), plus
+  Tageszaehler fuer Anfragen, Erfolge, Funde und KB in Upstash.
+- **Tagesbericht** (Audit): Cron (`/api/daily-report`, 05:15 UTC) schreibt Anfragen, Erfolge,
+  Funde und MB des Vortags als Zeile in die Tabelle, mit WARNUNG unter 50 % Erfolg. Braucht
+  `CRON_SECRET`.
+- **Laenderauswahl** (Audit): `countries` im Request begrenzt die Liste auf Laender mit eigenem
+  VPN-Server; Ausgangsland immer dabei, Status in Spalte P traegt "Laenderauswahl".
+- **Permalink** (Audit): `/api/result?id=` liefert ein gespeichertes Ergebnis 30 Tage lang, ohne
+  Link und ohne Reisezeitraum.
+- **Eingabegrenzen und generische Fehlermeldung** (Audit): Link 2048, Zimmer 200 Zeichen,
+  Whitelist fuer Verpflegung/Storno; `err.message` geht nicht mehr an den Client.
 
 - **Genius-Rabatt ist in allen Laendersitzungen gleich hoch** (Three House, 19.09.:
   −144,90 USD entsprechen exakt −126,42 EUR). Ausgeloggte Messungen bleiben also

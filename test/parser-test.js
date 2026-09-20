@@ -8,16 +8,12 @@
 // gehoeren nicht in ein oeffentliches Repository.
 
 const fs=require('fs');
-const crypto=require('crypto');
-const src=fs.readFileSync('api/check-price.js','utf8');
-const teile=[/const TAX_LINE_RE[\s\S]*?const NEG_AMOUNT_RE = [^\n]*\n/,/function extractExclusiveTaxPct[\s\S]*?\n}\n/,/const ABS_EXTRA_TAX_RE[\s\S]*?\nfunction extractAbsoluteExtraTax[\s\S]*?\n}\n/,/function looksLikeNewRoomHeading[\s\S]*?\n}\n/,/function tarifstufen[\s\S]*?\n}\n/,/function boardOfLine[\s\S]*?\n}\n/,/function cancelOfLine[\s\S]*?\n}\n/,/function findRoomPrice[\s\S]*?\n}\n/,/function parseAmount[\s\S]*?\n}\n/,/function boardsFromText[\s\S]*?\n}\n/,/function cancelsFromText[\s\S]*?\n}\n/,/function computeRoomOptions[\s\S]*?\n}\n/,/const ALL_COUNTRIES = [^\n]*\n/,/function alleLaenderFuersLog[\s\S]*?\n}\n/,/function hotelLandAusLink[\s\S]*?\n}\n/,/const DEFAULT_CURRENCY_BY_COUNTRY = \{[\s\S]*?\n\};\n/,/const HOTEL_LAND_ALIAS = [^\n]*\n/,/const HOTEL_LAND_MUTTERLAND = \{[\s\S]*?\n\};\n/,/function proxyLandFuerHotel[\s\S]*?\n}\n/,/function laenderFuerDieseSuche[\s\S]*?\n}\n/,/const WAEHRUNGS_PARAMS = [^\n]*\n/,/function normalisiereLinkFuerAbruf[\s\S]*?\n}\n/,/const DEFAULT_DEVICE = [^\n]*\n/,/const LOG_STRIP_PARAMS = new Set\(\[[\s\S]*?\]\);\n/,/function linkFuersLog[\s\S]*?\n}\n/,/const CACHE_VERSION = [^\n]*\n/,/function cacheKeyFor[\s\S]*?\n}\n/];
-let code='const ROOM_NAME_MAX_LEN = 140;\nconst BACKSCAN_LINES = 6;\n'; for(const re of teile){const m=src.match(re); if(!m){console.error('FEHLT',re);process.exit(1);} code+=m[0]+'\n';}
-// Mit `const` deklarierte Werte bleiben im eval-Geltungsbereich und waeren hier draussen nicht
-// sichtbar - die Funktionen dagegen schon. Deshalb die benoetigten Konstanten ausdruecklich
-// herausreichen, statt sie im Test ein zweites Mal zu pflegen (sonst prueft der Test am Ende
-// seine eigene Kopie und nicht den echten Code).
-code += 'globalThis.ALL_COUNTRIES = ALL_COUNTRIES;\nglobalThis.DEFAULT_DEVICE = DEFAULT_DEVICE;\nglobalThis.cacheKeyFor = cacheKeyFor;\n';
-eval(code);
+// Seit der Aufteilung in Module werden die Funktionen normal importiert. Vorher zog der Test sie
+// per Regex aus api/check-price.js heraus - das brach bei jeder Umbenennung und prueft im Zweifel
+// die eigene Kopie statt den echten Code.
+const { findRoomPrice, computeRoomOptions, summarize } = require('../lib/parser');
+const { ALL_COUNTRIES, alleLaenderFuersLog, hotelLandAusLink, hotelNameAusLink, laenderFuerDieseSuche, linkFuersLog, normalisiereLinkFuerAbruf } = require('../lib/config');
+const { cacheKeyFor } = require('../lib/store');
 let fehler=0;
 function pruefe(name, bt, room, board, cancel, erwartetBetrag, erwartetGenius){
   const [amt,,cur,gen]=findRoomPrice(bt,room,board,cancel);
@@ -25,7 +21,7 @@ function pruefe(name, bt, room, board, cancel, erwartetBetrag, erwartetGenius){
   if(!ok) fehler++;
   console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' Genius '+String(gen));
 }
-const bt=fs.readFileSync('test/seite-genius.txt','utf8');
+const bt=fs.readFileSync(require('path').join(__dirname,'seite-genius.txt'),'utf8');
 pruefe('Genius-Seite, Uebernachtung/egal', bt,'Superior Double Room with Harbour View','uebernachtung','unsicher','251,27',48.53);
 pruefe('Genius-Seite, storno ja',           bt,'Superior Double Room with Harbour View','uebernachtung','ja','270,29',52.2);
 pruefe('Zimmer ohne Genius',                bt,'Komfort-Doppelzimmer','fruehstueck','ja','300',null);
@@ -106,33 +102,52 @@ pruefeLog('Zusatzland steht auch im Log',
   [{country:'FR',priceEuro:119,currency:'EUR'},{country:'DE',priceEuro:125,currency:'EUR'}],
   'DE:125:EUR|FR:119:EUR', laenderFuerDieseSuche('https://www.booking.com/hotel/re/beispiel.de.html'));  // leck-check-ok: frei erfundenes Hotel "beispiel", stammt nicht aus dem Log
 
-// --- Cache-Schluessel: gleiche Suche muss gleich landen ----------------------------------
-// Anlass: Der Schluessel wurde aus dem ROHEN Link gebildet. Booking haengt sid, aid und label
-// pro Sitzung neu an - zwei Besucher mit derselben Suche hatten also nie denselben Schluessel,
-// und jede Wiederholung kostete rund 30 MB bezahlten Traffic fuer eine Antwort, die schon dalag.
-// Alle Links hier sind erfunden.
-// Bewusst die ECHTE cacheKeyFor aus dem Produktivcode, nicht eine nachgebaute Kopie - sonst
-// prueft der Test am Ende sich selbst. Sie faengt intern Fehler ab und faellt auf den Rohlink
-// zurueck; genau deshalb muessen alle Bausteine oben mitextrahiert sein.
-const schluessel = (l) => cacheKeyFor(l, 'Doppelzimmer', 'uebernachtung', 'egal', DEFAULT_DEVICE);
-function pruefeSchluessel(name, a, b, sollGleich){
-  const ok = (schluessel(a) === schluessel(b)) === sollGleich;
-  if(!ok) fehler++;
-  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' '+(sollGleich?'gleich':'verschieden'));
+// --- Laenderauswahl durch den Nutzer -----------------------------------------------------------
+function pruefeAuswahl(name, auswahl, soll, link){
+  const ist = laenderFuerDieseSuche(link || 'https://www.booking.com/hotel/de/beispiel.de.html', auswahl, 'DE').join(','); // leck-check-ok: erfundenes Hotel
+  const ok = ist === soll; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' '+ist);
 }
-const basis = 'https://www.booking.com/hotel/de/beispielhof';  // leck-check-ok: frei erfundenes Hotel
-const datum = 'checkin=2026-11-10&checkout=2026-11-11&group_adults=2';  // leck-check-ok: erfundene Testdaten fuer den Cache-Schluessel, stammen nicht aus dem Log
-pruefeSchluessel('andere sid/aid/label = selbe Suche',
-  `${basis}.de.html?${datum}&sid=aaaa1111&aid=304142&label=gen173nr-xyz`,  // leck-check-ok: erfundene Testdaten fuer den Cache-Schluessel, stammen nicht aus dem Log
-  `${basis}.de.html?${datum}&sid=bbbb2222&aid=999999`, true);  // leck-check-ok: erfundene Testdaten fuer den Cache-Schluessel, stammen nicht aus dem Log
-pruefeSchluessel('fremde Sprachfassung = selbe Suche',
-  `${basis}.de.html?${datum}`, `${basis}.en-gb.html?${datum}`, true);
-pruefeSchluessel('andere Reisedaten = andere Suche',
-  `${basis}.de.html?${datum}`,
-  `${basis}.de.html?checkin=2026-12-01&checkout=2026-12-02&group_adults=2`, false);  // leck-check-ok: erfundene Testdaten fuer den Cache-Schluessel, stammen nicht aus dem Log
-pruefeSchluessel('andere Personenzahl = andere Suche',
-  `${basis}.de.html?${datum}`,
-  `${basis}.de.html?checkin=2026-11-10&checkout=2026-11-11&group_adults=4`, false);  // leck-check-ok: erfundene Testdaten fuer den Cache-Schluessel, stammen nicht aus dem Log
+pruefeAuswahl('nur JP und US, Ausgangsland kommt dazu', ['jp','US'], 'DE,US,JP');
+pruefeAuswahl('unbekannte Kuerzel fallen weg', ['XX','JP'], 'DE,JP');
+pruefeAuswahl('ein Land allein ist kein Vergleich', ['DE'], ALL_COUNTRIES.join(','));
+pruefeAuswahl('leere Auswahl = alle', [], ALL_COUNTRIES.join(','));
+pruefeAuswahl('Hotelland bleibt waehlbar', ['FR'], 'DE,FR', 'https://www.booking.com/hotel/fr/beispiel.de.html'); // leck-check-ok: erfundenes Hotel
+
+// --- Schwelle: 1 % ohne Umrechnung, 3 % mit ---------------------------------------------------
+function pruefeSchwelle(name, results, sollRelevant, sollSchwelle){
+  const s = summarize(results.map((r)=>({...r})), 'DE');
+  const ok = s.relevantSaving === sollRelevant && s.relevantThresholdPct === sollSchwelle; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' relevant='+s.relevantSaving+' Schwelle='+s.relevantThresholdPct+' %='+s.savingsPct);
+}
+pruefeSchwelle('2,2 % in EUR gemessen = Fund',
+  [{country:'DE',priceEuro:1292.06,currency:'EUR'},{country:'JP',priceEuro:1264,currency:'EUR'}], true, 1);
+pruefeSchwelle('2,2 % aus USD umgerechnet = kein Fund',
+  [{country:'DE',priceEuro:1292.06,currency:'EUR'},{country:'US',priceEuro:1264,currency:'USD'}], false, 3);
+pruefeSchwelle('11 % aus COP umgerechnet = Fund',
+  [{country:'DE',priceEuro:1000,currency:'EUR'},{country:'CO',priceEuro:890,currency:'COP'}], true, 3);
+
+// --- Cache-Schluessel: Sitzungs-ID und Sprache aendern nichts -----------------------------------
+function pruefeCache(name, a, b, sollGleich){
+  const ka = cacheKeyFor(a,'Zimmer','egal','unsicher','windows',ALL_COUNTRIES);
+  const kb = cacheKeyFor(b,'Zimmer','egal','unsicher','windows',ALL_COUNTRIES);
+  const ok = (ka===kb)===sollGleich; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' '+(ka===kb?'gleich':'verschieden'));
+}
+const basis='https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-01&checkout=2027-03-03'; // leck-check-ok: erfundenes Hotel und Datum
+pruefeCache('gleiche Suche, andere sid/aid', basis+'&sid=abc&aid=1', basis+'&sid=xyz&aid=2&label=foo', true); // leck-check-ok: erfundene Platzhalterwerte, kein echter Link
+pruefeCache('englischer Link derselben Suche', basis, basis.replace('.de.html','.en-gb.html')+'&lang=en-us', true);
+pruefeCache('anderes Datum = andere Suche', basis, basis.replace('2027-03-03','2027-03-04'), false);
+pruefeCache('andere Personenzahl = andere Suche', basis+'&group_adults=2', basis+'&group_adults=4', false);
+
+// --- Hotelname fuers Best-of -------------------------------------------------------------------
+function pruefeName(name, link, soll){
+  const ist = hotelNameAusLink(link); const ok = ist===soll; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' ['+ist+']');
+}
+pruefeName('Slug wird lesbar', 'https://www.booking.com/hotel/de/beispiel-hof-am-see.de.html?checkin=2027-01-01', 'Beispiel Hof Am See'); // leck-check-ok: erfundenes Hotel und Datum
+pruefeName('ohne Sprachkuerzel', 'https://www.booking.com/hotel/th/beispiel-resort.html', 'Beispiel Resort'); // leck-check-ok: erfundenes Hotel
+pruefeName('kein Hotel', 'https://www.booking.com/searchresults.de.html', '');
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);

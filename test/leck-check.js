@@ -29,7 +29,8 @@ const MUSTER = [
 ];
 
 // Dateien, die gar nicht erst geprueft werden (Binaerkram, Abhaengigkeiten).
-const UEBERSPRINGEN = /(^|\/)(node_modules|\.git)(\/|$)|\.(png|jpe?g|gif|webp|ico|pdf|zip|woff2?)$/i;
+// package-lock.json enthaelt sha512-Integritaetswerte, die wie Token aussehen, aber keine sind.
+const UEBERSPRINGEN = /(^|\/)(node_modules|\.git|\.vercel)(\/|$)|(^|\/)package-lock\.json$|\.(png|jpe?g|gif|webp|ico|pdf|zip|woff2?)$/i;
 // Zeilen, die eine Ausnahme ausdruecklich erlauben. Wer hier etwas markiert, uebernimmt die
 // Verantwortung dafuer - deshalb gehoert in dieselbe Zeile eine kurze Begruendung.
 const AUSNAHME = /leck-check-ok/;
