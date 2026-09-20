@@ -1,8 +1,27 @@
 # Offene Punkte
 
-Stand: 19.09.2026. Reihenfolge = Wichtigkeit.
+Stand: 20.09.2026. Reihenfolge = Wichtigkeit.
 
-## 1. Eigene Waehrungsumrechnung erzeugt Scheinfunde (~2 %)
+## 1. Alte Proxy-Kennung steht in der Git-Historie
+
+**Nur der Betreiber kann das erledigen — es geht um Zugangsdaten.**
+
+Im Commit `b98d564` (18.09.) wurde die echte Smartproxy-Sub-User-Kennung aus einem
+Code-Kommentar entfernt, wo sie als Beispiel stand. Im aktuellen Stand findet der Leck-Check
+sie nicht mehr, aber **jeder Commit davor liegt weiter oeffentlich auf GitHub**. Das Passwort
+war nie dabei, die Kennung ist aber die halbe Zugangsinformation.
+
+Richtige Reihenfolge:
+
+1. Beim Proxy-Anbieter einen neuen Sub-User anlegen.
+2. `SMARTPROXY_USER_PREFIX` und `SMARTPROXY_PASSWORD` in Vercel auf den neuen tauschen.
+3. Pruefen, dass eine Suche noch laeuft.
+4. Erst dann den alten Sub-User loeschen.
+
+Danach ist die Kennung in der Historie wertlos. Ein History-Rewrite lohnt sich nicht: Er ist
+aufwendig, und Forks, Caches und Mirrors erreicht er ohnehin nicht.
+
+## 2. Eigene Waehrungsumrechnung erzeugt Scheinfunde (~2 %)
 
 **Belegt am 19.09. am Three House Hotel, Funchal, 14.–21.12.2026.**
 
@@ -33,7 +52,7 @@ Nicht betroffen sind Funde, bei denen Booking selbst Euro ausgewiesen hat — z.
 Derag Muenchen (477,40 € gegen 423,86 € ueber Japan, per VPN bis in die Buchungsmaske
 geprueft) und Le Nid Douillet (9,1 %).
 
-## 2. Tarifzeilen einer Zimmerkarte werden nicht gefunden
+## 3. Tarifzeilen einer Zimmerkarte werden nicht gefunden
 
 **Ruby Lilly Muenchen, Zimmer „Rubys Choice – Zimmer mit Upgrade", 26.–27.09.2026.**
 
@@ -52,7 +71,7 @@ hilfreich, der den Ausschnitt an einem gewaehlten Zimmer verankert statt an room
 Die Fehlermeldung nennt seit dem 19.09. keinen erfundenen Grund mehr, der Fehler selbst
 ist offen.
 
-## 3. Relevanzschwelle pro Land
+## 4. Relevanzschwelle pro Land
 
 Auswertung ueber 110 Eintraege — alle vor dem 19.09. und damit nur Siegerlaender. Ab jetzt
 steht in Spalte Q jede Suche vollstaendig, die Tabelle laesst sich also bald neu rechnen:
@@ -70,7 +89,7 @@ Peru gewinnt achtmal und liegt nie ueber 0,5 % — reines Rauschen. Aegypten fas
 Indien gewinnt nur, wenn es substanziell ist (kleinster Wert 3,7 %). Eine feste
 1-%-Schwelle fuer alle Laender passt dazu nicht.
 
-## 4. Proxy-Abdeckung des dynamischen Landes ungeprueft
+## 5. Proxy-Abdeckung des dynamischen Landes ungeprueft
 
 Seit dem 19.09. laeuft zusaetzlich eine Sitzung im Land der Unterkunft (siehe Geklaert).
 Ungeprueft ist, fuer welche dieser Laender Smartproxy ueberhaupt Ausgangs-IPs hat. Fehlt eines,
@@ -81,7 +100,7 @@ Laender Preise haben, fehlt vermutlich der Proxy.
 Nach ein paar Tagen auszaehlen, welche Laender systematisch leer bleiben, und die entweder aus
 DEFAULT_CURRENCY_BY_COUNTRY streichen oder aufs Mutterland umbiegen.
 
-## 5. Waehrungshinweis in der Ergebnisanzeige
+## 6. Waehrungshinweis in der Ergebnisanzeige
 
 Booking bietet an, in der Waehrung der Landessitzung abzurechnen. Gemessen am 18.09.:
 423,86 € gegen 77.720 JPY, letzteres zum Tageskurs rund sieben Euro teurer. Das frisst
@@ -92,7 +111,7 @@ In der Ergebnisanzeige steht bisher nur „Karte ohne Fremdwaehrungsgebuehr" —
 die Bankgebuehr, nicht auf Bookings Umrechnung. Ergaenzen: immer in der Waehrung der
 Unterkunft zahlen, nie in der angebotenen.
 
-## 6. „Best of" auf der Startseite
+## 7. „Best of" auf der Startseite
 
 Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 
@@ -104,12 +123,12 @@ Groesste Ersparnisse der letzten Suchen zeigen. Bedingungen:
 - Die Datenschutzerklaerung nennt als Zweck bisher nur Verbesserung und Auswertung.
   Veroeffentlichung ist ein weiterer Zweck und gehoert dort benannt.
 
-## 7. Mobiler Parser
+## 8. Mobiler Parser
 
 `MOBILE_READY = false`. Geraeteprofile fuer Android und iPhone sind vorhanden, das mobile
 Layout versteht der Parser aber nicht. Mobile Anfragen fallen auf Windows zurueck.
 
-## 8. Referrer-Experiment
+## 9. Referrer-Experiment
 
 Anregung von krabbs (Travel-Dealz): Zieht eine Weiterleitung von trivago oder Miles & More
 eine andere Rate als der Direkteinstieg? Waere mit dem vorhandenen Aufbau messbar, weil der
@@ -127,6 +146,22 @@ wuerde sonst die eigenen Messungen verzerren.
   18.09. herausgerechnet.
 - **Fremdsprachige Links** werden vor dem Abruf auf Deutsch gezwungen (18.09.).
 - **Kolumbien-Abbruch** ersatzlos entfernt; er hatte die eigene Statistik erzeugt.
+- **Externe Badges entfernt** (20.09.). OpenHunts, Fazier und Uneed wurden als Bilder
+  eingebunden und uebertrugen bei JEDEM Seitenaufruf die Besucher-IP an drei fremde Server -
+  im Widerspruch zu Abschnitt 6 der Datenschutzerklaerung. Jetzt Textlinks: Es geht erst etwas
+  raus, wenn jemand klickt. Die "Preis anfragen"-Passage in der Datenschutzerklaerung beschrieb
+  eine Mailto-Funktion, die es nie gab (der Knopf springt zum Formular) - in allen sechs
+  Sprachen korrigiert.
+- **Kostendeckel** (20.09.). Turnstile hielt Skripte ab, begrenzte aber nichts. Jetzt zwoelf
+  Suchen pro IP und Stunde plus ein globaler Tagesdeckel (`TAGESBUDGET_SUCHEN`, Standard 300),
+  gezaehlt erst kurz bevor Proxies anlaufen - Cache-Treffer kosten nichts und zaehlen nicht mit.
+- **Cache-Schluessel bereinigt** (20.09.). Er entstand aus dem ROHEN Link. Booking haengt sid,
+  aid und label pro Sitzung neu an, also war dieselbe Suche zweier Besucher nie derselbe
+  Schluessel - jedes Mal 30 MB fuer eine Antwort, die schon dalag. Jetzt wird vor dem Hashen
+  bereinigt und die Sprachfassung normalisiert.
+- **Debug-Schalter gesperrt** (20.09.). `debug`, `debugLines`, `noScripts` und die freie
+  Geraetewahl konnte jeder im Body setzen. Jetzt nur noch mit Header `x-georates-debug`, der zu
+  `DEBUG_SECRET` passt; ohne gesetztes Secret sind sie ganz aus.
 - **Das Land der Unterkunft wird mitgeprueft** (19.09.). Die feste Liste war eine weltweite
   Stichprobe und passte sich dem Hotel nie an: Fuer ein Hotel auf Réunion verglich sie die
   deutsche Sitzung gegen dreizehn aussereuropaeische - und gegen keine andere europaeische.
