@@ -4,5 +4,8 @@
       "maxDuration": 180,
       "memory": 2048
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/daily-report", "schedule": "15 5 * * *" }
+  ]
 }

@@ -1,0 +1,20 @@
+# Laeuft bei jedem Push und Pull Request: Parser-Regressionstests und Leck-Check.
+# Der Leck-Check ist absichtlich Pflicht - am 17.09.2026 landete die echte Suche eines Besuchers
+# im oeffentlichen Repo. Rot heisst: nicht mergen, bevor das geklaert ist.
+name: Tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node test/parser-test.js
+      - run: node test/handler-test.js
+      - run: node test/leck-check.js
