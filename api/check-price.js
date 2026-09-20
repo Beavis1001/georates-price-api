@@ -121,7 +121,15 @@ module.exports = async (req, res) => {
   // Bot-Check fuer BEIDE Modi. Der Zimmer-Abruf lief bisher ohne Turnstile, weil er "leicht" ist -
   // er loest aber genauso echten Proxy-Traffic aus und war damit der billigste Weg, Guthaben zu
   // verbrennen. Ohne konfigurierten Key wird der Check uebersprungen (verifyTurnstile).
-  const humanOk = await verifyTurnstile(turnstileToken, remoteIp);
+  //
+  // AUSNAHME: der Debug-Modus. Ein gueltiges Turnstile-Token entsteht nur im Browser auf
+  // georates.tech und gilt genau einmal - von aussen ist der Debug-Modus damit unerreichbar.
+  // Das ist genau verkehrt herum: Gebraucht wird die Diagnose, wenn man von aussen nachsehen
+  // will, was der Server wirklich geladen hat (am 20.09.2026 eine ganze Sitzung lang das
+  // fehlende Werkzeug). Geschuetzt ist der Modus bereits durch DEBUG_SECRET, das ein Angreifer
+  // nicht hat; Zaehlbremse und Tagesdeckel laufen unveraendert weiter, der Proxy-Traffic
+  // bleibt also gedeckelt.
+  const humanOk = debug || await verifyTurnstile(turnstileToken, remoteIp);
   if (!humanOk) {
     if (mode === 'rooms') { res.status(403).json({ success: false, reason: 'bot_check_failed' }); return; }
     respond(403, { success: false, reason: 'bot_check_failed' });
@@ -447,11 +455,16 @@ module.exports = async (req, res) => {
     const payload = { ...summary, partial, resultId, countries: laender };
     if (summary.success) {
       await store.cacheSet(cacheKey, { ...summary, partial, countries: laender });
+      // Hotelname und Hotelland aus der Adresse NACH der Weiterleitung lesen, sonst aus dem
+      // eingegebenen Link. Bookings Teilen-Adressen (booking.com/Share-xxx) enthalten weder
+      // Name noch Land; am 20.09. stand deshalb ein namenloser Best-of-Eintrag in der Liste.
+      const baseRowFuerLink = results.find((r) => r.country === baselineCountry);
+      const linkFuerName = (baseRowFuerLink && baseRowFuerLink.finalUrl) || link;
       // Permalink: dasselbe Ergebnis ohne Link und ohne Zimmername-Freitext, aber mit dem, was
       // ein Empfaenger zum Einordnen braucht (Hotelname, Hotelland, Zimmer, Verpflegung).
       await store.resultSpeichern(resultId, {
         ...summary, partial, countries: laender,
-        hotelName: cfg.hotelNameAusLink(link), hotelLand: cfg.hotelLandAusLink(link),
+        hotelName: cfg.hotelNameAusLink(linkFuerName), hotelLand: cfg.hotelLandAusLink(linkFuerName),
         room, board, cancel, device: deviceLabel, datum: new Date().toISOString().slice(0, 10),
       });
       // Jede (neue) erfolgreiche Abfrage in die Google-Tabelle loggen - als Deal-Sammlung.
@@ -477,7 +490,7 @@ module.exports = async (req, res) => {
         empfehlung: summary.recommendVpnCountry ? 'ja' : 'nein',
         herkunftsland,
         alleLaender: cfg.alleLaenderFuersLog(results, laender),
-        hotelLand: cfg.hotelLandAusLink(link),
+        hotelLand: cfg.hotelLandAusLink(linkFuerName),
         // Bei einem gekuerzten Lauf gehoert in die Tabelle, WIE stark gekuerzt wurde - sonst
         // laesst sich spaeter nicht beurteilen, ob ein "kein Fund" belastbar ist.
         // Dazu der Proxy-Verbrauch dieser Abfrage: Nur so laesst sich sehen, was eine Suche
@@ -492,7 +505,7 @@ module.exports = async (req, res) => {
       // Best-of nur bei echten Funden und nur anonymisiert (siehe lib/store.js).
       if (summary.relevantSaving && basePrice != null && ersparnisEuro != null) {
         await store.bestofSpeichern({
-          hotel: cfg.hotelNameAusLink(link), hotelLand: cfg.hotelLandAusLink(link),
+          hotel: cfg.hotelNameAusLink(linkFuerName), hotelLand: cfg.hotelLandAusLink(linkFuerName),
           land: best.country, baseline: baselineCountry,
           pct: summary.savingsPct, euro: ersparnisEuro, basisEuro: basePrice,
           umgerechnet: !!summary.convertedCurrency, datum: new Date().toISOString().slice(0, 10), resultId,
