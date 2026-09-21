@@ -52,8 +52,8 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
    (Schwelle, Genius-Behandlung, Laenderliste, Parser-Auswahl). Nicht bei reinen Fehlerkorrekturen.
    Sonst liefert der Cache 24 Stunden alte Ergebnisse und man sucht den Fehler im neuen Code.
 5. **Frontend und API gehoeren zusammen.** Aenderungen an Request-Feldern (`countries`,
-   `turnstileToken`, `mode`), Antwortgruenden (`reason`) oder der Stream-Struktur (`meta`,
-   `country`, `summary`) brauchen den passenden Commit im Repo `georates`. Neue `reason`-Werte
+   `turnstileToken`, `userPrice`, `mode`), Antwortgruenden (`reason`) oder der Stream-Struktur
+   (`meta`, `country`, `update`, `summary`) brauchen den passenden Commit im Repo `georates`. Neue `reason`-Werte
    brauchen dort einen Schluessel `err_<reason>` in allen sechs Sprachen.
 6. **Parser ist deutschsprachig.** Er sucht nach "Steuern und Gebuehren", "Kostenlose Stornierung",
    "Fruehstueck". Deshalb zwingt `normalisiereLinkFuerAbruf` jeden Link auf `.de.html` + `lang=de`,
@@ -83,7 +83,16 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
   `UPSTASH_REDIS_REST_*` (von Hand). Beide werden akzeptiert. Fehlen beide, laufen Cache, Bremsen und
   Best-of stumm ins Leere; genau das ist vom 16. bis 20.09.2026 passiert. Der Tagesbericht warnt jetzt.
 - **Debug** (`debug`, `debugRoom`, `debugLines`, `noScripts`, Geraetewahl) nur mit Header
-  `X-GeoRates-Debug: <DEBUG_SECRET>`. Ohne gesetztes Secret ist alles aus.
+  `X-GeoRates-Debug: <DEBUG_SECRET>`. Ohne gesetztes Secret ist alles aus. Mit gueltigem
+  Debug-Header entfaellt Turnstile (Zaehlbremse und Tagesdeckel bleiben).
+- **Preisstreuung** (seit 21.09.2026): Booking teilt Preise pro Sitzung zu (Mobile Rate,
+  Online-Zahlungsrabatt, Kurzfristig-Deal, Genius). Gegenmittel: Ausgangsland `BASELINE_SAMPLES`-mal
+  parallel (Standard 2), zusammengefuehrt auf den NIEDRIGEREN Preis (`samples`, `spreadPct`);
+  Fund ueber der Schwelle einmal bestaetigen (`CONFIRM_FINDS`), Siegerland auf den HOEHEREN Preis,
+  Ergebnis in `confirmation.stable`; jede Stufe traegt `deals` (`DEAL_MUSTER` in lib/parser.js);
+  optionaler `userPrice` als konservative Referenz (`baselineUsedEuro`). Aktualisierte Zeilen gehen
+  als Stream-Typ `update`. Nicht stabile Funde landen nicht im Best-of. `STRIP_PARTNER_PARAMS=1`
+  entfernt aid/label auch beim Abruf (Experiment). Sechs Abrufe je Land waren bewusst NICHT der Weg.
 
 ## Stil
 
