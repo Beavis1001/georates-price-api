@@ -33,6 +33,41 @@ const alt = ['Studio mit Kingsize-Bett','Belegung: 2 Erwachsene','Vergleichen',
 pruefe('17.09.: Wunsch kostenlos stornierbar', alt,'Studio mit Kingsize-Bett','uebernachtung','ja','1.589',null);
 pruefe('17.09.: Wunsch nicht stornierbar',     alt,'Studio mit Kingsize-Bett','uebernachtung','nein','1.523',null);
 
+// --- 21.09.: Zimmername kommt mehrfach vor -----------------------------------------------
+// Sechs Abrufe derselben Hotelseite (Horizon of Pattaya, deutsche Sitzung) lieferten
+// abwechselnd 452,84 und 462,24 EUR - zwei Tarife DESSELBEN Zimmers, einmal nicht stornierbar,
+// einmal kostenlos stornierbar. Ursache war nicht Booking: findRoomPrice ankerte auf der ERSTEN
+// Zeile, die mit dem Zimmernamen beginnt, und die lag je nach Abruf vor oder hinter dem ersten
+// Tarifblock. Seitdem werden die Stufen aus ALLEN Fundstellen vereinigt und nach Position
+// sortiert - die Auswahl ist damit unabhaengig davon, wo der erste Namenstreffer lag.
+//
+// Zusaetzlich geprueft: die Tarifart, die findRoomPrice jetzt mitliefert (Stelle 5 und 6).
+function pruefeTarif(name, bt, room, board, cancel, sollBetrag, sollStorno){
+  const [amt,,,,storno]=findRoomPrice(bt,room,board,cancel);
+  const ok = String(amt)===String(sollBetrag) && String(storno)===String(sollStorno);
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' Storno '+String(storno));
+}
+const zweiTarife = [
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 489','€ 453','€ 489,43','€ 452,84','Einschließlich Steuern und Gebühren','7% sparen','Nicht kostenlos stornierbar','Zimmer auswählen',
+ '€ 544','€ 462','€ 543,81','€ 462,24','Einschließlich Steuern und Gebühren','15% sparen','Kostenlose Stornierung vor dem 20. Dezember 2026','Zimmer auswählen',
+ // zweite Fundstelle des Namens (Auswahlliste am Seitenende)
+ 'Deluxe Doppelzimmer mit Balkon','Zimmer auswählen','0','1          (€ 452)'].join('\n');
+pruefeTarif('zwei Tarife, egal -> erste Stufe im Text', zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','unsicher','452,84','nein');
+pruefeTarif('zwei Tarife, Wunsch stornierbar',          zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','ja','462,24','ja');
+pruefeTarif('zwei Tarife, Wunsch nicht stornierbar',    zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','nein','452,84','nein');
+
+// Dieselben zwei Tarife, aber die Fundstellen in umgekehrter Reihenfolge im Text. Frueher
+// entschied allein die erste Fundstelle, welche Stufen ueberhaupt gesehen wurden - der nicht
+// stornierbare Tarif war dann unsichtbar.
+const zweiFundstellen = [
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 544','€ 462','€ 543,81','€ 462,24','Einschließlich Steuern und Gebühren','15% sparen','Kostenlose Stornierung vor dem 20. Dezember 2026','Zimmer auswählen',
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 489','€ 453','€ 489,43','€ 452,84','Einschließlich Steuern und Gebühren','7% sparen','Nicht kostenlos stornierbar','Zimmer auswählen'].join('\n');
+pruefeTarif('beide Fundstellen werden vereinigt', zweiFundstellen,'Deluxe Doppelzimmer mit Balkon','egal','nein','452,84','nein');
+
 // --- Verpflegungs-/Storno-Optionen fuers Dropdown ---------------------------------------
 function pruefeOptionen(name, bt, zimmer, erwarteteBoards){
   const o = computeRoomOptions(bt, [zimmer])[zimmer] || { boards: [], cancels: [] };
@@ -148,6 +183,34 @@ function pruefeName(name, link, soll){
 pruefeName('Slug wird lesbar', 'https://www.booking.com/hotel/de/beispiel-hof-am-see.de.html?checkin=2027-01-01', 'Beispiel Hof Am See'); // leck-check-ok: erfundenes Hotel und Datum
 pruefeName('ohne Sprachkuerzel', 'https://www.booking.com/hotel/th/beispiel-resort.html', 'Beispiel Resort'); // leck-check-ok: erfundenes Hotel
 pruefeName('kein Hotel', 'https://www.booking.com/searchresults.de.html', '');
+
+// --- Deal-Plaketten je Tarifstufe -------------------------------------------------------------
+// Anlass 20.09.: Indien war nur wegen "Booking.com bezahlt -27.413 INR" guenstiger - ein
+// Zahlungsart-Rabatt, kein Landespreis. Der Grund muss am Ergebnis stehen.
+const dealText = ['Doppelzimmer Deluxe','Belegung: 2 Erwachsene',
+ 'Mobile Rate','Preis € 900','Einschließlich Steuern und Gebühren','Kostenlose Stornierung','Zimmer auswählen',
+ 'Preis € 1.000','Einschließlich Steuern und Gebühren','Nicht kostenlos stornierbar','Rabatt für Online-Zahlung','Zimmer auswählen'].join('\n');
+function pruefeDeals(name, cancel, sollBetrag, sollDeals){
+  const r = findRoomPrice(dealText,'Doppelzimmer Deluxe','egal',cancel);
+  const ist = (r[6]||[]).slice().sort().join(',');
+  const ok = String(r[0])===sollBetrag && ist===sollDeals; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+r[0]+' Deals ['+ist+']');
+}
+pruefeDeals('Stufe 1 traegt Mobile Rate', 'ja', '900', 'mobile');
+pruefeDeals('Stufe 2 traegt Online-Zahlungsrabatt', 'nein', '1.000', 'online_payment');
+const ohneDeal = findRoomPrice(bt,'Komfort-Doppelzimmer','fruehstueck','ja');
+{ const ok = Array.isArray(ohneDeal[6]) && ohneDeal[6].length===0; if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+'Zimmer ohne Plakette: leere Deal-Liste'.padEnd(44)+' ['+(ohneDeal[6]||[]).join(',')+']'); }
+
+// --- Nutzerpreis als konservative Referenz ------------------------------------------------------
+function pruefeNutzerpreis(name, userPrice, sollPct, sollBasis, sollDiffers){
+  const s = summarize([{country:'DE',priceEuro:1000,currency:'EUR'},{country:'JP',priceEuro:900,currency:'EUR'}], 'DE', {userPriceEuro:userPrice});
+  const ok = s.savingsPct===sollPct && s.baselineUsedEuro===sollBasis && s.userPriceDiffers===sollDiffers; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' %='+s.savingsPct+' Basis='+s.baselineUsedEuro+' abweichend='+s.userPriceDiffers);
+}
+pruefeNutzerpreis('ohne Nutzerpreis: 10 % gegen DE', null, 10, 1000, false);
+pruefeNutzerpreis('Nutzer sieht 950: gegen 950 gerechnet', 950, 5.3, 950, true);
+pruefeNutzerpreis('Nutzer sieht 1100: unser DE bleibt Referenz', 1100, 10, 1000, true);
+pruefeNutzerpreis('Nutzer sieht 1002 (0,2 %): keine Abweichung', 1002, 10, 1000, false);
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
