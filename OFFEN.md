@@ -160,6 +160,14 @@ Einschalten, eine Handvoll Suchen fahren, Spalte Q und Status-MB vergleichen, da
 
 ## Geklaert, nicht mehr offen
 
+- **Preisstreuung pro Sitzung** (21.09.): Booking wuerfelt nicht, es teilt zu (Mobile Rate,
+  Online-Zahlungsrabatt, Kurzfristig-Deal, Genius, evtl. Partner-Kontext). Gegenmittel statt
+  sechsfacher Abrufe: Ausgangsland doppelt (niedrigerer Preis gilt), Fund einmal bestaetigt
+  (Siegerland hoeherer Preis gilt, sonst "nicht stabil"), Deal-Plaketten je Stufe im Ergebnis,
+  optionaler Nutzerpreis als konservative Referenz. Spalte P traegt DE-Stichproben, Bestaetigung,
+  Deals und Nutzerpreis; daraus laesst sich die Streuung nach ein paar Tagen beziffern.
+  Experiment `STRIP_PARTNER_PARAMS=1` prueft, ob aid/label an der Streuung beteiligt sind.
+
 - **Aufteilung in Module** (Audit): `lib/config`, `lib/parser`, `lib/browser`, `lib/store`,
   `lib/http`; Tests importieren normal statt per Regex. Neuer Handler-Ablauftest mit
   Browser-Stub, GitHub Action, exakte Versionen plus package-lock.json.

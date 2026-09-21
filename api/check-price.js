@@ -30,7 +30,8 @@ const {
   ALL_COUNTRIES, CHEAP_PROBE_COUNTRY, MAX_ATTEMPTS, EXPANSION_ATTEMPTS, EXPANSION_BATCH_SIZE,
   HARD_DEADLINE_MS, FIRST_BATCH_ESTIMATE_MS, BATCH_ESTIMATE_SAFETY, MIN_LOADED_LINES,
   DEFAULT_CURRENCY_BY_COUNTRY, LOG_BOARD_LABEL, LOG_CANCEL_LABEL, LOG_COUNTRY_LABEL,
-  MAX_LINK_LEN, MAX_ROOM_LEN, BOARD_VALUES, CANCEL_VALUES,
+  MAX_LINK_LEN, MAX_ROOM_LEN, MAX_USER_PRICE_EUR, BOARD_VALUES, CANCEL_VALUES,
+  BASELINE_SAMPLES, CONFIRM_FINDS, PARTNER_PARAMS_ENTFERNEN,
 } = cfg;
 
 const BOOKING_LINK_RE = /^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i;
@@ -53,7 +54,26 @@ function eingabenPruefen(body) {
   if (Array.isArray(b.countries)) {
     countries = b.countries.map((c) => String(c || '').toUpperCase().slice(0, 2)).filter((c) => /^[A-Z]{2}$/.test(c)).slice(0, 20);
   }
-  return { link, room, board, cancel, countries };
+  // Optional: der Preis, den der Nutzer in seinem Browser sieht (Euro, "1.234,56" oder "1234.56").
+  // Leer = nicht angegeben. Unsinn (Text, negativ, absurd hoch) wird als Fehler zurueckgegeben,
+  // damit niemand einen Vergleich gegen eine Zahl bekommt, die er gar nicht meinte.
+  let userPriceEuro = null;
+  if (b.userPrice !== undefined && b.userPrice !== null && String(b.userPrice).trim() !== '') {
+    userPriceEuro = parseUserPrice(b.userPrice);
+    if (userPriceEuro === null) return { fehler: 'invalid_price' };
+  }
+  return { link, room, board, cancel, countries, userPriceEuro };
+}
+
+function parseUserPrice(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 && raw < MAX_USER_PRICE_EUR ? Math.round(raw * 100) / 100 : null;
+  let t = String(raw).trim().replace(/[€\s]/g, '').replace(/^EUR/i, '');
+  if (!/^[\d.,]+$/.test(t)) return null;
+  // Deutsch "1.234,56" -> 1234.56; englisch "1234.56" bleibt; "1.234" (Tausender) -> 1234
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+  const v = parseFloat(t);
+  return Number.isFinite(v) && v > 0 && v < MAX_USER_PRICE_EUR ? Math.round(v * 100) / 100 : null;
 }
 
 // Fehlermeldungen an den Client sind generisch. Die Details (Stack, Proxy-Antworten) gehoeren
@@ -302,6 +322,11 @@ module.exports = async (req, res) => {
   const cached = await store.cacheGet(cacheKey);
   if (cached) {
     await logAttempt('aus Cache');
+    // Der Cache haelt die Laenderpreise ohne Nutzerpreis. Bringt der Nutzer einen mit, wird die
+    // Zusammenfassung hier neu gerechnet - so bleibt derselbe Cache-Eintrag fuer alle nutzbar.
+    const zusammenfassung = eingabe.userPriceEuro !== null && cached.success && Array.isArray(cached.results)
+      ? { ...cached, ...parser.summarize(cached.results, cached.baselineCountry, { userPriceEuro: eingabe.userPriceEuro }) }
+      : cached;
     // Aus dem Cache liegt alles sofort vor. Im Stream-Modus schicken wir die Laenderzeilen
     // trotzdem einzeln, damit das Frontend nur EINEN Darstellungsweg braucht.
     if (wantsStream) {
@@ -309,7 +334,7 @@ module.exports = async (req, res) => {
       streamSend({ type: 'meta', baselineCountry: cached.baselineCountry, fromCache: true, totalCountries: (cached.results || []).length });
       (cached.results || []).forEach((r) => streamSend({ type: 'country', result: r }));
     }
-    respond(200, { ...cached, fromCache: true, resultId });
+    respond(200, { ...zusammenfassung, fromCache: true, resultId });
     return;
   }
 
@@ -373,8 +398,37 @@ module.exports = async (req, res) => {
     // Live-Tabelle auf und verschwindet erst mit der Endauswertung wieder - das sieht aus,
     // als wuerde das Tool raten.
     let basePriceForGuard = null;
+    const fetchOnly = (c, attempts) =>
+      browser.fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device);
+    // Ergebnis eines Landes ohne die Diagnose-Zimmerliste streamen (die wuerde ein Fehlschlag
+    // sonst 15x durch die Leitung schicken).
+    const streamCountry = (r, typ) => {
+      const { diagnose, ...fuerDieTabelle } = r;
+      streamSend({ type: typ || 'country', result: fuerDieTabelle });
+    };
+    // Mehrere Stichproben eines Landes zu EINER Zeile zusammenfuehren. Booking teilt Preise pro
+    // Sitzung zu; zwei Abrufe koennen zwei Preise zeigen. Konservativ heisst: fuer das
+    // Ausgangsland der NIEDRIGERE (sonst rechnen wir die Ersparnis hoch), fuer ein Siegerland
+    // der HOEHERE (sonst halten wir ein Los fuer einen Fund). Die einzelnen Stichproben bleiben
+    // als `samples` am Ergebnis, die Streuung als `spreadPct`.
+    const zusammenfuehren = (proben, konservativ) => {
+      const mitPreis = proben.filter((r) => r && r.priceEuro != null);
+      const alleSamples = proben.flatMap((r) => (Array.isArray(r.samples) ? r.samples : [r.priceEuro]));
+      const gewaehlt = mitPreis.length
+        ? mitPreis.reduce((a, b) => ((konservativ === 'min' ? b.priceEuro < a.priceEuro : b.priceEuro > a.priceEuro) ? b : a))
+        : proben[0];
+      const r = { ...gewaehlt };
+      r.transferBytes = proben.reduce((sum, x) => sum + ((x && x.transferBytes) || 0), 0);
+      r.samples = alleSamples;
+      const werte = alleSamples.filter((v) => v != null);
+      r.spreadPct = werte.length >= 2 ? Math.round(((Math.max(...werte) - Math.min(...werte)) / Math.min(...werte)) * 1000) / 10 : null;
+      if (!r.deals) r.deals = [];
+      // Deals aller Stichproben einsammeln - ein Los kann eine Plakette tragen, das andere nicht.
+      r.deals = [...new Set(proben.flatMap((x) => (x && x.deals) || []))];
+      return r;
+    };
     const fetchAndStream = (c, attempts) =>
-      browser.fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device)
+      fetchOnly(c, attempts)
         .then((r) => {
           if (c !== baselineCountry && parser.implausibleVsBaseline(r.priceEuro, basePriceForGuard)) {
             r.priceEuro = null;
@@ -382,14 +436,17 @@ module.exports = async (req, res) => {
             r.priceRaw = 'Preis nicht verlässlich erkannt';
             r.implausible = true;
           }
-          // Die Diagnose (Zimmerliste der Seite) bleibt im Ergebnis, wird aber nicht pro Land
-          // gestreamt - sonst schickt ein Fehlschlag 15x dieselbe Liste durch die Leitung.
-          const { diagnose, ...fuerDieTabelle } = r;
-          streamSend({ type: 'country', result: fuerDieTabelle });
+          streamCountry(r);
           return r;
         });
 
-    results = await Promise.all(probeCountries.map((c) => fetchAndStream(c, MAX_ATTEMPTS)));
+    // Ausgangsland: BASELINE_SAMPLES Stichproben parallel (Standard 2), zusammengefuehrt auf den
+    // niedrigeren Preis, als EINE Zeile gestreamt. Kolumbien wie bisher einmal.
+    const baselineProbe = Promise.all(
+      Array.from({ length: BASELINE_SAMPLES }, (_, i) => fetchOnly(baselineCountry, i === 0 ? MAX_ATTEMPTS : 1))
+    ).then((proben) => { const r = zusammenfuehren(proben, 'min'); streamCountry(r); return r; });
+    const weitereProben = probeCountries.filter((c) => c !== baselineCountry).map((c) => fetchAndStream(c, MAX_ATTEMPTS));
+    results = await Promise.all([baselineProbe, ...weitereProben]);
     // Ab hier kennen wir den Referenzpreis - alle folgenden Laender laufen durch die Pruefung.
     const probeBase = results.find((r) => r.country === baselineCountry);
     basePriceForGuard = probeBase && probeBase.priceEuro != null ? probeBase.priceEuro : null;
@@ -397,7 +454,8 @@ module.exports = async (req, res) => {
     console.log('[check-price] Baseline:', baselineCountry, '| Probe-Ergebnis:',
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
-    let summary = parser.summarize(results, baselineCountry);
+    const summarizeOpts = { userPriceEuro: eingabe.userPriceEuro };
+    let summary = parser.summarize(results, baselineCountry, summarizeOpts);
     let partial = false;
 
     // Hier wurde die Suche frueher abgebrochen, sobald Kolumbien mindestens 10% guenstiger war
@@ -444,8 +502,42 @@ module.exports = async (req, res) => {
         // Ausreisser die Planung dauerhaft nach oben und wir pruefen weniger Laender als moeglich.
         batchEstimateMs = Math.round((Date.now() - batchStart) * BATCH_ESTIMATE_SAFETY);
       }
-      summary = parser.summarize(results, baselineCountry);
+      summary = parser.summarize(results, baselineCountry, summarizeOpts);
     }
+
+    // Fund einmal bestaetigen. Liegt ein Land ueber der Schwelle, werden Siegerland und
+    // Ausgangsland je einmal nachgeladen (zwei Seiten, nur bei Funden). Ausgangsland konservativ
+    // auf den niedrigeren, Siegerland auf den hoeheren Preis zusammengefuehrt. Bleibt der
+    // Vorsprung ueber der Schwelle, ist es ein Fund; sonst war es ein Los, und die Antwort sagt
+    // das (`confirmation.stable = false`). Nur, wenn die Zeit noch reicht.
+    let confirmation = null;
+    if (CONFIRM_FINDS && summary.success && summary.relevantSaving && !zimmerFehltAufDerSeite) {
+      const elapsed = Date.now() - startTime;
+      if (elapsed + FIRST_BATCH_ESTIMATE_MS <= HARD_DEADLINE_MS) {
+        const vorher = summary.savingsPct;
+        const bestCountry = summary.best.country;
+        const [bestNeu, baseNeu] = await Promise.all([fetchOnly(bestCountry, 1), fetchOnly(baselineCountry, 1)]);
+        const ersetze = (country, neu, konservativ) => {
+          const idx = results.findIndex((r) => r.country === country);
+          if (idx < 0) return;
+          if (neu && neu.priceEuro != null && parser.implausibleVsBaseline(neu.priceEuro, basePriceForGuard)) neu.priceEuro = null;
+          const r = zusammenfuehren([results[idx], neu], konservativ);
+          results[idx] = r;
+          streamCountry(r, 'update');
+        };
+        ersetze(bestCountry, bestNeu, 'max');
+        ersetze(baselineCountry, baseNeu, 'min');
+        summary = parser.summarize(results, baselineCountry, summarizeOpts);
+        confirmation = {
+          done: true, country: bestCountry, savingsBeforePct: vorher, savingsAfterPct: summary.savingsPct,
+          stable: !!summary.relevantSaving && summary.best && summary.best.country === bestCountry,
+        };
+        console.log(`[check-price] Bestaetigung ${bestCountry}: ${vorher} % -> ${summary.savingsPct} % (${confirmation.stable ? 'stabil' : 'nicht stabil'})`);
+      } else {
+        confirmation = { done: false, reason: 'time' };
+      }
+    }
+    if (summary.success) summary.confirmation = confirmation;
 
     // Die Zimmerliste haengt jetzt einmal an summary.diagnose; an den einzelnen Laendern
     // waere sie nur Ballast in der Antwort (und im Cache).
@@ -454,7 +546,10 @@ module.exports = async (req, res) => {
     const bytesGesamt = results.reduce((s, r) => s + (r.transferBytes || 0), 0);
     const payload = { ...summary, partial, resultId, countries: laender };
     if (summary.success) {
-      await store.cacheSet(cacheKey, { ...summary, partial, countries: laender });
+      // Ohne Nutzerpreis-Felder cachen: Der Eintrag gilt fuer alle, die dasselbe Zimmer suchen.
+      const { userPriceEuro: _u, userPriceDiffers: _d, ...neutral } = summary;
+      const neutralSummary = eingabe.userPriceEuro !== null ? { ...neutral, ...parser.summarize(results, baselineCountry, {}) } : neutral;
+      await store.cacheSet(cacheKey, { ...neutralSummary, partial, countries: laender });
       // Hotelname und Hotelland aus der Adresse NACH der Weiterleitung lesen, sonst aus dem
       // eingegebenen Link. Bookings Teilen-Adressen (booking.com/Share-xxx) enthalten weder
       // Name noch Land; am 20.09. stand deshalb ein namenloser Best-of-Eintrag in der Liste.
@@ -500,10 +595,19 @@ module.exports = async (req, res) => {
         status: (partial ? `ok (nur ${results.length} von ${laender.length} Ländern – Zeitlimit)` : 'ok')
           + ` · ${deviceLabel}`
           + ` · ${Math.round(bytesGesamt / (1024 * 1024))} MB`
-          + (laender.length < ALL_COUNTRIES.length ? ' · Länderauswahl' : ''),
+          + (laender.length < ALL_COUNTRIES.length ? ' · Länderauswahl' : '')
+          // Preisstreuung sichtbar machen: Stichproben des Ausgangslands, Bestaetigung, Deals des
+          // Siegerlands, Nutzerpreis, Partner-Parameter-Experiment. Alles in Spalte P, damit die
+          // Tabelle ohne neue Spalten auswertbar bleibt.
+          + (baseRow && Array.isArray(baseRow.samples) && baseRow.samples.length > 1 ? ` · DE-Stichproben ${baseRow.samples.map((v) => (v == null ? '-' : v)).join('/')}` : '')
+          + (confirmation && confirmation.done ? ` · bestätigt ${confirmation.savingsBeforePct}→${confirmation.savingsAfterPct} % ${confirmation.stable ? 'stabil' : 'NICHT stabil'}` : '')
+          + (best.deals && best.deals.length ? ` · Deals ${best.deals.join(',')}` : '')
+          + (eingabe.userPriceEuro !== null ? ` · Nutzerpreis ${eingabe.userPriceEuro}` : '')
+          + (PARTNER_PARAMS_ENTFERNEN ? ' · ohne aid/label' : ''),
       });
       // Best-of nur bei echten Funden und nur anonymisiert (siehe lib/store.js).
-      if (summary.relevantSaving && basePrice != null && ersparnisEuro != null) {
+      const nichtStabil = confirmation && confirmation.done && !confirmation.stable;
+      if (summary.relevantSaving && !nichtStabil && basePrice != null && ersparnisEuro != null) {
         await store.bestofSpeichern({
           hotel: cfg.hotelNameAusLink(linkFuerName), hotelLand: cfg.hotelLandAusLink(linkFuerName),
           land: best.country, baseline: baselineCountry,

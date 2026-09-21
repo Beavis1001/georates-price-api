@@ -41,6 +41,13 @@ Land der Unterkunft, falls es nicht in der Liste steht. Der Nutzer kann die List
 einschraenken (z. B. nur die Laender, in denen sein VPN Server hat); das Ausgangsland ist immer
 dabei. Wechselkurse kommen live von open.er-api.com, Ersatzquelle ist die currency-api auf jsDelivr.
 
+Booking teilt Preise pro Sitzung zu (A/B-Experimente, Mobile Rate, Zahlungsart-Rabatte). Dagegen:
+Das Ausgangsland wird zweimal abgerufen und der niedrigere Preis gilt; ein Fund ueber der Schwelle
+wird einmal bestaetigt (Siegerland konservativ auf den hoeheren Preis); jede Tarifstufe traegt die
+erkannten Deal-Plaketten (`deals`); optional rechnet der Nutzer gegen den Preis, den er selbst sieht
+(`userPrice`). Die Antwort traegt `baselineSamples`, `baselineSpreadPct`, `confirmation`,
+`baselineUsedEuro`, und jede Laenderzeile `deals`, `samples`, `spreadPct`.
+
 Ein Unterschied gilt ab 1 % als Fund. Musste der Bestpreis von uns umgerechnet werden (Booking
 zeigte dort eine andere Waehrung als im Ausgangsland), erst ab 3 % - siehe OFFEN.md, Punkt 1.
 
@@ -67,6 +74,9 @@ Umgebungsvariablen und nie im Code:
 | `PRICE_RATE_LIMIT` (12), `ROOMS_RATE_LIMIT` (20) | Abrufe pro IP und Stunde |
 | `DEBUG_SECRET` | Debug-Antworten und freie Geraetewahl nur mit Header `X-GeoRates-Debug: <Secret>`; ohne Variable ist Debug aus |
 | `CRON_SECRET` | schuetzt `/api/daily-report`; Vercel setzt den Header beim Cron-Aufruf selbst |
+| `BASELINE_SAMPLES` (Standard 2) | Wie oft das Ausgangsland parallel abgerufen wird; gerechnet wird gegen den niedrigsten Preis |
+| `CONFIRM_FINDS` (Standard an, `0` = aus) | Fund ueber der Schwelle einmal bestaetigen: Siegerland und Ausgangsland je ein weiterer Abruf |
+| `STRIP_PARTNER_PARAMS` | `1` = `aid` und `label` auch beim Abruf entfernen (Experiment zur Preisstreuung) |
 | `BROWSER_SHARED` | `1` = ein Chromium fuer alle Laender (Kontext je Proxy) statt ein Start je Land; noch nicht live gemessen |
 | `ALLOWED_ORIGIN` | CORS-Origin, Standard `https://georates.tech` |
 

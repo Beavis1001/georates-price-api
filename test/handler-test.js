@@ -11,6 +11,10 @@ const Module = require('module');
 
 // Stub fuer lib/browser: dieselbe Schnittstelle, aber ohne Puppeteer.
 const PREISE = { DE: 1000, CO: 890, JP: 950, US: 980 };
+// Aufrufe pro Land zaehlen; ueber PREIS_FOLGE laesst sich je Land eine Folge von Preisen vorgeben
+// (Stichprobe 1, 2, ...), um Streuung zu simulieren.
+const aufrufe = {};
+let PREIS_FOLGE = {};
 const stubBrowser = {
   chromiumVorbereiten: async () => {},
   sharedBrowserSchliessen: async () => {},
@@ -18,10 +22,16 @@ const stubBrowser = {
   deviceProfile: () => ({ label: 'Windows/Desktop' }),
   resolveDevice: () => 'windows',
   attemptFetch: async () => ({ bodyText: 'Zimmerkategorie\nDoppelzimmer\nPreis € 100\nEinschließlich Steuern und Gebühren\n' + 'x\n'.repeat(100), rooms: [{ name: 'Doppelzimmer', boards: ['uebernachtung'], cancels: ['ja'] }], loadedOk: true, transferBytes: 2048, err: null }),
-  fetchPrice: async (country) => ({
-    country, priceRaw: 'stub', currency: country === 'DE' ? 'EUR' : 'USD',
-    priceLocal: PREISE[country] || null, priceEuro: PREISE[country] || null, transferBytes: 1024 * 1024,
-  }),
+  fetchPrice: async (country) => {
+    aufrufe[country] = (aufrufe[country] || 0) + 1;
+    const folge = PREIS_FOLGE[country];
+    const preis = folge ? folge[Math.min(aufrufe[country] - 1, folge.length - 1)] : (PREISE[country] || null);
+    return {
+      country, priceRaw: 'stub', currency: country === 'DE' ? 'EUR' : 'USD',
+      priceLocal: preis, priceEuro: preis, transferBytes: 1024 * 1024,
+      deals: country === 'CO' ? ['online_payment'] : [],
+    };
+  },
 };
 const browserPfad = require.resolve('../lib/browser');
 require.cache[browserPfad] = { id: browserPfad, filename: browserPfad, loaded: true, exports: stubBrowser };
@@ -71,9 +81,41 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
 
   r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
   ok('voller Lauf: alle 15 Laender', r.body.success === true && r.body.results.length === 15, r.body.results.length);
+  // Preisstreuung: Ausgangsland zweimal, Fund einmal bestaetigt (Sieger + Ausgangsland je +1)
+  ok('Ausgangsland 2 Stichproben + 1 Bestaetigung = 3 Abrufe', aufrufe.DE === 3, aufrufe.DE);
+  ok('Siegerland 1 + 1 Bestaetigung = 2 Abrufe', aufrufe.CO === 2, aufrufe.CO);
+  ok('andere Laender genau 1 Abruf', aufrufe.JP === 1 && aufrufe.US === 1);
+  const deRow = r.body.results.find((x) => x.country === 'DE');
+  ok('samples am Ausgangsland, Streuung 0 %', Array.isArray(deRow.samples) && deRow.samples.length === 3 && deRow.spreadPct === 0, JSON.stringify(deRow.samples));
+  ok('Deals des Siegerlands in der Antwort', JSON.stringify(r.body.best.deals) === '["online_payment"]');
+  ok('Bestaetigung stabil', r.body.confirmation && r.body.confirmation.done && r.body.confirmation.stable === true);
+  ok('baselineSamples in der Zusammenfassung', Array.isArray(r.body.baselineSamples));
   ok('Sieger Kolumbien, 11 % aus USD umgerechnet = Fund (>= 3 %)', r.body.best.country === 'CO' && r.body.relevantSaving === true && r.body.relevantThresholdPct === 3, r.body.savingsPct + ' %');
   ok('VPN-Empfehlung ab 10 %', r.body.recommendVpnCountry === 'CO');
   ok('resultId und Laenderliste in der Antwort', /^[A-Za-z0-9_-]{12}$/.test(r.body.resultId) && Array.isArray(r.body.countries));
+
+  // Streuung im Ausgangsland: zweite Stichprobe zeigt 900 -> gegen 900 gerechnet -> CO (890) unter 3 %
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = { DE: [1000, 900] };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  const de2 = r.body.results.find((x) => x.country === 'DE');
+  ok('Ausgangsland konservativ auf den niedrigeren Preis', de2.priceEuro === 900 && de2.spreadPct === 11.1, de2.priceEuro + ' / ' + de2.spreadPct);
+  ok('11 % Schein-Vorsprung wird kein Fund', r.body.relevantSaving === false, r.body.savingsPct + ' %');
+  ok('keine Bestaetigung ohne Fund', aufrufe.CO === 1 && (!r.body.confirmation), aufrufe.CO);
+  // Los beim Siegerland: Bestaetigung zeigt 990 statt 890 -> nicht stabil
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = { CO: [890, 990] };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  const co = r.body.results.find((x) => x.country === 'CO');
+  ok('Siegerland konservativ auf den hoeheren Preis', co.priceEuro === 990 && JSON.stringify(co.samples) === '[890,990]', JSON.stringify(co.samples));
+  ok('Bestaetigung meldet: nicht stabil', r.body.confirmation && r.body.confirmation.done && r.body.confirmation.stable === false, JSON.stringify(r.body.confirmation));
+  PREIS_FOLGE = {};
+  // Nutzerpreis: sieht 950 -> Ersparnis gegen 950
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', userPrice: '950,00 €' });
+  ok('Nutzerpreis "950,00 €" wird gegen 950 gerechnet', r.body.baselineUsedEuro === 950 && r.body.userPriceDiffers === true && r.body.savingsPct === 6.3, r.body.savingsPct + ' %');
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', userPrice: 'abc' });
+  ok('unsinniger Nutzerpreis wird abgelehnt', r.statusCode === 400 && r.body.reason === 'invalid_price');
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
 
   r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', countries: ['JP', 'US'] });
   ok('Laenderauswahl: nur DE, US, JP', r.body.results.map((x) => x.country).sort().join(',') === 'DE,JP,US', r.body.results.map((x) => x.country).join(','));
@@ -82,7 +124,8 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', stream: true });
   const zeilen = r.chunks.join('').trim().split('\n').map((l) => JSON.parse(l));
   ok('Stream: meta zuerst, summary zuletzt', zeilen[0].type === 'meta' && zeilen[zeilen.length - 1].type === 'summary');
-  ok('Stream: 15 Laenderzeilen', zeilen.filter((z) => z.type === 'country').length === 15);
+  ok('Stream: 15 Laenderzeilen (Ausgangsland nur einmal)', zeilen.filter((z) => z.type === 'country').length === 15);
+  ok('Stream: Bestaetigung als update-Zeilen', zeilen.filter((z) => z.type === 'update').length === 2);
   ok('Stream: NDJSON-Header gesetzt', /ndjson/.test(r.headers['content-type']));
 
   r = await call({ mode: 'rooms', link: LINK });
