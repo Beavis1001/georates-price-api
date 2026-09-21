@@ -33,6 +33,41 @@ const alt = ['Studio mit Kingsize-Bett','Belegung: 2 Erwachsene','Vergleichen',
 pruefe('17.09.: Wunsch kostenlos stornierbar', alt,'Studio mit Kingsize-Bett','uebernachtung','ja','1.589',null);
 pruefe('17.09.: Wunsch nicht stornierbar',     alt,'Studio mit Kingsize-Bett','uebernachtung','nein','1.523',null);
 
+// --- 21.09.: Zimmername kommt mehrfach vor -----------------------------------------------
+// Sechs Abrufe derselben Hotelseite (Horizon of Pattaya, deutsche Sitzung) lieferten
+// abwechselnd 452,84 und 462,24 EUR - zwei Tarife DESSELBEN Zimmers, einmal nicht stornierbar,
+// einmal kostenlos stornierbar. Ursache war nicht Booking: findRoomPrice ankerte auf der ERSTEN
+// Zeile, die mit dem Zimmernamen beginnt, und die lag je nach Abruf vor oder hinter dem ersten
+// Tarifblock. Seitdem werden die Stufen aus ALLEN Fundstellen vereinigt und nach Position
+// sortiert - die Auswahl ist damit unabhaengig davon, wo der erste Namenstreffer lag.
+//
+// Zusaetzlich geprueft: die Tarifart, die findRoomPrice jetzt mitliefert (Stelle 5 und 6).
+function pruefeTarif(name, bt, room, board, cancel, sollBetrag, sollStorno){
+  const [amt,,,,storno]=findRoomPrice(bt,room,board,cancel);
+  const ok = String(amt)===String(sollBetrag) && String(storno)===String(sollStorno);
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' Storno '+String(storno));
+}
+const zweiTarife = [
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 489','€ 453','€ 489,43','€ 452,84','Einschließlich Steuern und Gebühren','7% sparen','Nicht kostenlos stornierbar','Zimmer auswählen',
+ '€ 544','€ 462','€ 543,81','€ 462,24','Einschließlich Steuern und Gebühren','15% sparen','Kostenlose Stornierung vor dem 20. Dezember 2026','Zimmer auswählen',
+ // zweite Fundstelle des Namens (Auswahlliste am Seitenende)
+ 'Deluxe Doppelzimmer mit Balkon','Zimmer auswählen','0','1          (€ 452)'].join('\n');
+pruefeTarif('zwei Tarife, egal -> erste Stufe im Text', zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','unsicher','452,84','nein');
+pruefeTarif('zwei Tarife, Wunsch stornierbar',          zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','ja','462,24','ja');
+pruefeTarif('zwei Tarife, Wunsch nicht stornierbar',    zweiTarife,'Deluxe Doppelzimmer mit Balkon','egal','nein','452,84','nein');
+
+// Dieselben zwei Tarife, aber die Fundstellen in umgekehrter Reihenfolge im Text. Frueher
+// entschied allein die erste Fundstelle, welche Stufen ueberhaupt gesehen wurden - der nicht
+// stornierbare Tarif war dann unsichtbar.
+const zweiFundstellen = [
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 544','€ 462','€ 543,81','€ 462,24','Einschließlich Steuern und Gebühren','15% sparen','Kostenlose Stornierung vor dem 20. Dezember 2026','Zimmer auswählen',
+ 'Deluxe Doppelzimmer mit Balkon','Belegung: 2 Erwachsene','28 m²',
+ '€ 489','€ 453','€ 489,43','€ 452,84','Einschließlich Steuern und Gebühren','7% sparen','Nicht kostenlos stornierbar','Zimmer auswählen'].join('\n');
+pruefeTarif('beide Fundstellen werden vereinigt', zweiFundstellen,'Deluxe Doppelzimmer mit Balkon','egal','nein','452,84','nein');
+
 // --- Verpflegungs-/Storno-Optionen fuers Dropdown ---------------------------------------
 function pruefeOptionen(name, bt, zimmer, erwarteteBoards){
   const o = computeRoomOptions(bt, [zimmer])[zimmer] || { boards: [], cancels: [] };
