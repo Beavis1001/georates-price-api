@@ -138,10 +138,35 @@ Urspruengliche Bedingungen, alle eingehalten:
 - Die Datenschutzerklaerung nennt als Zweck bisher nur Verbesserung und Auswertung.
   Veroeffentlichung ist ein weiterer Zweck und gehoert dort benannt.
 
-## 8. Mobiler Parser
+## 8. Smartphone-Preis live validieren (Experiment eingebaut, 21.09.)
 
-`MOBILE_READY = false`. Geraeteprofile fuer Android und iPhone sind vorhanden, das mobile
-Layout versteht der Parser aber nicht. Mobile Anfragen fallen auf Windows zurueck.
+Christophers Screenshot vom 21.09.: Am Handy stand fuer dasselbe Zimmer "Preis nur fuer
+Mobilgeraetnutzer" 1.709 statt 1.899 EUR - 10 % unter dem Desktop-Preis ALLER 16 Laender, ohne
+VPN. Das ist der groesste Einzelhebel, den das Tool bisher nicht sieht.
+
+Eingebaut hinter `MOBILE_CHECK=1` (Standard aus): ein zusaetzlicher Abruf des Ausgangslands mit
+Android-Profil, eigener Parser `findRoomPriceMobile` (lib/parser.js, Anker "Preis fuer N Naechte:",
+letzte Betragszeile = Preis, Kartenende "Reservieren"), Bewertung `mobilBewerten` (verwirft alles
+ausserhalb 50-105 % des Desktop-Preises), Bestaetigung per zweitem Abruf, Stream-Typ `mobile`,
+`summary.mobile`, Frontend zeigt eine Zeile "Deutschland · Smartphone" und einen Hinweis ohne
+VPN-Schritt. Handler- und Parser-Tests decken den Ablauf mit Stub und erfundener Fixture ab.
+
+**Offen ist die Validierung gegen die echte mobile Seite** - der Parser ist aus dem Screenshot
+abgeleitet. Vorgehen (kostet zwei, drei Abrufe):
+
+1. Debug-Abruf `mode: 'rooms'` mit `device: 'android'`, `debugRoom: '<Zimmer>'`, `debugLines: 160`
+   und Header `X-GeoRates-Debug`. Pruefen, ob im Text "Preis fuer N Naechte:" steht und darunter die
+   Betragszeilen wie im Screenshot ("€ 1.899", "€ 1.709"). Weicht der Wortlaut ab, `MOBILE_TOTAL_RE`,
+   `MOBILE_CARD_END_RE` und die Fixture in test/parser-test.js anpassen.
+2. Klaeren, ob der mobile Preis Steuern/Gebuehren enthaelt. Die Karte sagt nur "Es koennen
+   zusaetzliche Gebuehren anfallen"; der Streichpreis 1.899 entsprach dem Desktop-Endpreis, was
+   fuer "inklusive" spricht. Wenn nicht: `extractExclusiveTaxPct`-Logik auch im Mobil-Pfad anwenden.
+3. `MOBILE_CHECK=1` in Vercel setzen, fuenf Suchen, Spalte P ("Mobil ...") mit dem eigenen Handy
+   vergleichen. Stimmt es, Flag stehen lassen; die Datenschutzerklaerung braucht keine Aenderung
+   (gleicher Zweck, gleiche Daten).
+
+Danach denkbar: Mobil-Abruf auch im Siegerland (Mobile Rate + Landespreis kombiniert) und
+`MOBILE_READY = true`, damit auch der Nutzerwunsch "alle Laender mobil" moeglich wird.
 
 ## 9. Referrer-Experiment
 

@@ -31,7 +31,7 @@ const {
   HARD_DEADLINE_MS, FIRST_BATCH_ESTIMATE_MS, BATCH_ESTIMATE_SAFETY, MIN_LOADED_LINES,
   DEFAULT_CURRENCY_BY_COUNTRY, LOG_BOARD_LABEL, LOG_CANCEL_LABEL, LOG_COUNTRY_LABEL,
   MAX_LINK_LEN, MAX_ROOM_LEN, MAX_USER_PRICE_EUR, BOARD_VALUES, CANCEL_VALUES,
-  BASELINE_SAMPLES, CONFIRM_FINDS, PARTNER_PARAMS_ENTFERNEN,
+  BASELINE_SAMPLES, CONFIRM_FINDS, PARTNER_PARAMS_ENTFERNEN, MOBILE_CHECK, MOBILE_DEVICE,
 } = cfg;
 
 const BOOKING_LINK_RE = /^https?:\/\/([a-z0-9-]+\.)*booking\.com\//i;
@@ -317,7 +317,9 @@ module.exports = async (req, res) => {
   // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft, optional vom
   // Nutzer eingeschraenkt.
   const laender = cfg.laenderFuerDieseSuche(link, eingabe.countries, baselineCountry);
-  const cacheKey = store.cacheKeyFor(link, room, board, cancel, device, laender);
+  // Mit Smartphone-Abruf traegt das Ergebnis eine Zeile mehr - ein anderer Cache-Eintrag, sonst
+  // liefert der Cache nach dem Einschalten 24 Stunden lang Ergebnisse ohne Smartphone-Zeile.
+  const cacheKey = store.cacheKeyFor(link, room, board, cancel, device + (MOBILE_CHECK ? '+mobil' : ''), laender);
   const resultId = store.resultIdFor(cacheKey);
   const cached = await store.cacheGet(cacheKey);
   if (cached) {
@@ -327,6 +329,8 @@ module.exports = async (req, res) => {
     const zusammenfassung = eingabe.userPriceEuro !== null && cached.success && Array.isArray(cached.results)
       ? { ...cached, ...parser.summarize(cached.results, cached.baselineCountry, { userPriceEuro: eingabe.userPriceEuro }) }
       : cached;
+    // Die Smartphone-Zeile haengt am Ausgangspreis; mit Nutzerpreis wird auch sie neu gerechnet.
+    if (cached.mobile && zusammenfassung !== cached) zusammenfassung.mobile = parser.mobilBewerten(cached.mobile, zusammenfassung);
     // Aus dem Cache liegt alles sofort vor. Im Stream-Modus schicken wir die Laenderzeilen
     // trotzdem einzeln, damit das Frontend nur EINEN Darstellungsweg braucht.
     if (wantsStream) {
@@ -398,8 +402,9 @@ module.exports = async (req, res) => {
     // Live-Tabelle auf und verschwindet erst mit der Endauswertung wieder - das sieht aus,
     // als wuerde das Tool raten.
     let basePriceForGuard = null;
-    const fetchOnly = (c, attempts) =>
-      browser.fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, device);
+    // Drittes Argument: abweichendes Geraeteprofil, nur fuer den Smartphone-Abruf (MOBILE_CHECK).
+    const fetchOnly = (c, attempts, dev) =>
+      browser.fetchPrice(c, abrufLink, proxyServer, userPrefix, password, room, board, cancel, rates, attempts, dev || device);
     // Ergebnis eines Landes ohne die Diagnose-Zimmerliste streamen (die wuerde ein Fehlschlag
     // sonst 15x durch die Leitung schicken).
     const streamCountry = (r, typ) => {
@@ -446,7 +451,21 @@ module.exports = async (req, res) => {
       Array.from({ length: BASELINE_SAMPLES }, (_, i) => fetchOnly(baselineCountry, i === 0 ? MAX_ATTEMPTS : 1))
     ).then((proben) => { const r = zusammenfuehren(proben, 'min'); streamCountry(r); return r; });
     const weitereProben = probeCountries.filter((c) => c !== baselineCountry).map((c) => fetchAndStream(c, MAX_ATTEMPTS));
-    results = await Promise.all([baselineProbe, ...weitereProben]);
+    // Smartphone-Abruf (Experiment MOBILE_CHECK): dasselbe Zimmer im Ausgangsland, aber mit
+    // Mobilprofil. Laeuft parallel zur Probe, geht als Stream-Typ `mobile` raus und bleibt
+    // AUSSERHALB von `results` - die Laendertabelle vergleicht Laender, nicht Geraete. Bewertet
+    // wird die Zeile in mitMobil() gegen den Ausgangspreis (parser.mobilBewerten).
+    let mobileRow = null;
+    const mobileProbe = MOBILE_CHECK
+      ? fetchOnly(baselineCountry, 1, MOBILE_DEVICE).then((r) => { streamCountry(r, 'mobile'); return r; })
+      : Promise.resolve(null);
+    const mitMobil = (sum) => {
+      if (MOBILE_CHECK && sum && sum.success) sum.mobile = parser.mobilBewerten(mobileRow, sum);
+      return sum;
+    };
+    const [mobileErgebnis, ...probeErgebnisse] = await Promise.all([mobileProbe, baselineProbe, ...weitereProben]);
+    mobileRow = mobileErgebnis;
+    results = probeErgebnisse;
     // Ab hier kennen wir den Referenzpreis - alle folgenden Laender laufen durch die Pruefung.
     const probeBase = results.find((r) => r.country === baselineCountry);
     basePriceForGuard = probeBase && probeBase.priceEuro != null ? probeBase.priceEuro : null;
@@ -455,7 +474,7 @@ module.exports = async (req, res) => {
       JSON.stringify(results.map((r) => ({ c: r.country, eur: r.priceEuro, raw: r.priceRaw }))));
 
     const summarizeOpts = { userPriceEuro: eingabe.userPriceEuro };
-    let summary = parser.summarize(results, baselineCountry, summarizeOpts);
+    let summary = mitMobil(parser.summarize(results, baselineCountry, summarizeOpts));
     let partial = false;
 
     // Hier wurde die Suche frueher abgebrochen, sobald Kolumbien mindestens 10% guenstiger war
@@ -502,7 +521,7 @@ module.exports = async (req, res) => {
         // Ausreisser die Planung dauerhaft nach oben und wir pruefen weniger Laender als moeglich.
         batchEstimateMs = Math.round((Date.now() - batchStart) * BATCH_ESTIMATE_SAFETY);
       }
-      summary = parser.summarize(results, baselineCountry, summarizeOpts);
+      summary = mitMobil(parser.summarize(results, baselineCountry, summarizeOpts));
     }
 
     // Fund einmal bestaetigen. Liegt ein Land ueber der Schwelle, werden Siegerland und
@@ -527,7 +546,7 @@ module.exports = async (req, res) => {
         };
         ersetze(bestCountry, bestNeu, 'max');
         ersetze(baselineCountry, baseNeu, 'min');
-        summary = parser.summarize(results, baselineCountry, summarizeOpts);
+        summary = mitMobil(parser.summarize(results, baselineCountry, summarizeOpts));
         confirmation = {
           done: true, country: bestCountry, savingsBeforePct: vorher, savingsAfterPct: summary.savingsPct,
           stable: !!summary.relevantSaving && summary.best && summary.best.country === bestCountry,
@@ -539,6 +558,25 @@ module.exports = async (req, res) => {
     }
     if (summary.success) summary.confirmation = confirmation;
 
+    // Smartphone-Fund ebenfalls einmal bestaetigen: zweiter Mobil-Abruf, konservativ auf den
+    // HOEHEREN Preis zusammengefuehrt. Ein Mobil-Tarif ist genauso ein Sitzungs-Los wie ein
+    // Landespreis; ohne Bestaetigung wuerden wir "10 % per Smartphone" melden, wo beim zweiten
+    // Laden schon nichts mehr davon steht.
+    if (MOBILE_CHECK && CONFIRM_FINDS && summary.success && summary.mobile && summary.mobile.relevant && !zimmerFehltAufDerSeite) {
+      const elapsed = Date.now() - startTime;
+      if (elapsed + FIRST_BATCH_ESTIMATE_MS <= HARD_DEADLINE_MS) {
+        const vorher = summary.mobile.savingsPct;
+        const neu = await fetchOnly(baselineCountry, 1, MOBILE_DEVICE);
+        mobileRow = zusammenfuehren([mobileRow, neu], 'max');
+        streamCountry(mobileRow, 'mobile');
+        summary = mitMobil(summary);
+        summary.mobile.confirmation = { done: true, savingsBeforePct: vorher, savingsAfterPct: summary.mobile.savingsPct, stable: summary.mobile.relevant };
+        console.log(`[check-price] Bestaetigung Smartphone: ${vorher} % -> ${summary.mobile.savingsPct} % (${summary.mobile.relevant ? 'stabil' : 'nicht stabil'})`);
+      } else {
+        summary.mobile.confirmation = { done: false, reason: 'time' };
+      }
+    }
+
     // Die Zimmerliste haengt jetzt einmal an summary.diagnose; an den einzelnen Laendern
     // waere sie nur Ballast in der Antwort (und im Cache).
     for (const r of results) delete r.diagnose;
@@ -548,7 +586,7 @@ module.exports = async (req, res) => {
     if (summary.success) {
       // Ohne Nutzerpreis-Felder cachen: Der Eintrag gilt fuer alle, die dasselbe Zimmer suchen.
       const { userPriceEuro: _u, userPriceDiffers: _d, ...neutral } = summary;
-      const neutralSummary = eingabe.userPriceEuro !== null ? { ...neutral, ...parser.summarize(results, baselineCountry, {}) } : neutral;
+      const neutralSummary = eingabe.userPriceEuro !== null ? { ...neutral, ...mitMobil(parser.summarize(results, baselineCountry, {})) } : neutral;
       await store.cacheSet(cacheKey, { ...neutralSummary, partial, countries: laender });
       // Hotelname und Hotelland aus der Adresse NACH der Weiterleitung lesen, sonst aus dem
       // eingegebenen Link. Bookings Teilen-Adressen (booking.com/Share-xxx) enthalten weder
@@ -603,7 +641,9 @@ module.exports = async (req, res) => {
           + (confirmation && confirmation.done ? ` · bestätigt ${confirmation.savingsBeforePct}→${confirmation.savingsAfterPct} % ${confirmation.stable ? 'stabil' : 'NICHT stabil'}` : '')
           + (best.deals && best.deals.length ? ` · Deals ${best.deals.join(',')}` : '')
           + (eingabe.userPriceEuro !== null ? ` · Nutzerpreis ${eingabe.userPriceEuro}` : '')
-          + (PARTNER_PARAMS_ENTFERNEN ? ' · ohne aid/label' : ''),
+          + (PARTNER_PARAMS_ENTFERNEN ? ' · ohne aid/label' : '')
+          // Smartphone-Zeile: Preis und Vorsprung, sonst "-" (nicht gelesen oder unplausibel).
+          + (MOBILE_CHECK ? ` · Mobil ${summary.mobile && summary.mobile.priceEuro != null ? `${summary.mobile.priceEuro} (${summary.mobile.savingsPct} %${summary.mobile.confirmation && summary.mobile.confirmation.done ? (summary.mobile.confirmation.stable ? ', bestätigt' : ', NICHT stabil') : ''})` : '-'}` : ''),
       });
       // Best-of nur bei echten Funden und nur anonymisiert (siehe lib/store.js).
       const nichtStabil = confirmation && confirmation.done && !confirmation.stable;

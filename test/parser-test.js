@@ -11,7 +11,7 @@ const fs=require('fs');
 // Seit der Aufteilung in Module werden die Funktionen normal importiert. Vorher zog der Test sie
 // per Regex aus api/check-price.js heraus - das brach bei jeder Umbenennung und prueft im Zweifel
 // die eigene Kopie statt den echten Code.
-const { findRoomPrice, computeRoomOptions, summarize } = require('../lib/parser');
+const { findRoomPrice, findRoomPriceMobile, mobilBewerten, computeRoomOptions, summarize } = require('../lib/parser');
 const { ALL_COUNTRIES, alleLaenderFuersLog, hotelLandAusLink, hotelNameAusLink, laenderFuerDieseSuche, linkFuersLog, normalisiereLinkFuerAbruf } = require('../lib/config');
 const { cacheKeyFor } = require('../lib/store');
 let fehler=0;
@@ -211,6 +211,53 @@ pruefeNutzerpreis('ohne Nutzerpreis: 10 % gegen DE', null, 10, 1000, false);
 pruefeNutzerpreis('Nutzer sieht 950: gegen 950 gerechnet', 950, 5.3, 950, true);
 pruefeNutzerpreis('Nutzer sieht 1100: unser DE bleibt Referenz', 1100, 10, 1000, true);
 pruefeNutzerpreis('Nutzer sieht 1002 (0,2 %): keine Abweichung', 1002, 10, 1000, false);
+
+
+
+// --- 21.09.: Mobiles Layout (MOBILE_CHECK) ------------------------------------------------
+// Erfundenes Hotel, Struktur nach einem Screenshot der mobilen Booking-Seite (deutsche Sitzung).
+// Kein "Preis € X" in einer Zeile, keine Steuern-Zeile unter dem Preis: Anker ist "Preis fuer N
+// Naechte:", darunter Streichpreis und tatsaechlicher Preis. Der Desktop-Parser findet hier nichts.
+const mobil = ['Doppelzimmer mit Balkon','Wir haben noch 4','22 m²','Stadtblick','Kostenfreies WLAN',
+ 'Preiswert + Frühstück','Preis für:','Sehr gutes Frühstück im Preis inbegriffen','Nicht kostenlos stornierbar','•','Online-Zahlung',
+ 'Preis nur für Mobilgerätnutzer','Preis für 5 Nächte:','€ 1.899','€ 1.709','Es können zusätzliche Gebühren anfallen.','Reservieren',
+ 'Flexibel + Frühstück','Preis für:','Sehr gutes Frühstück im Preis inbegriffen','Kostenlose Stornierung vor dem 1. März 2027',
+ 'Preis für 5 Nächte:','€ 1.958','Es können zusätzliche Gebühren anfallen.','Reservieren',
+ 'Suite mit Meerblick','28 m²','Nur Übernachtung','Preis für:','Nicht kostenlos stornierbar','Preis für 5 Nächte:','€ 2.400','Reservieren'].join('\n');
+function pruefeMobil(name, bt, room, board, cancel, erwartetBetrag, erwartetDeals){
+  const r = findRoomPriceMobile(bt, room, board, cancel);
+  const [amt] = r; const deals = (r[6] || []).slice().sort().join(',');
+  const ok = String(amt)===String(erwartetBetrag) && (erwartetDeals === undefined || deals === erwartetDeals);
+  if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' Deals '+deals);
+}
+pruefeMobil('Mobil: Fruehstueck, nicht stornierbar', mobil,'Doppelzimmer mit Balkon','fruehstueck','nein','1.709','mobile,online_payment');
+pruefeMobil('Mobil: letzte Betragszeile, nicht der Streichpreis', mobil,'Doppelzimmer mit Balkon','egal','unsicher','1.709');
+pruefeMobil('Mobil: kostenlos stornierbar -> zweite Karte', mobil,'Doppelzimmer mit Balkon','fruehstueck','ja','1.958','');
+pruefeMobil('Mobil: naechstes Zimmer nicht vermischt', mobil,'Suite mit Meerblick','uebernachtung','unsicher','2.400','');
+pruefeMobil('Mobil: Zimmer nicht auf der Seite -> null', mobil,'Penthouse','egal','unsicher','null');
+pruefeMobil('Mobil-Parser auf Desktop-Seite -> null (nie raten)', bt,'Superior Double Room with Harbour View','uebernachtung','unsicher','null');
+{
+  const [amt] = findRoomPrice(mobil,'Doppelzimmer mit Balkon','egal','unsicher');
+  const ok = amt === null || amt === undefined; if(!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | '+'Desktop-Parser auf Mobil-Seite -> null'.padEnd(44)+' Betrag '+String(amt));
+}
+// Bewertung der Smartphone-Zeile gegen das Desktop-Ergebnis
+{
+  const sum = { success: true, baselineUsedEuro: 1899, best: { country: 'PE', priceEuro: 1891.24 } };
+  const a = mobilBewerten({ country: 'DE', priceEuro: 1709, currency: 'EUR', deals: ['mobile'] }, sum);
+  const b = mobilBewerten({ country: 'DE', priceEuro: 100 }, sum);
+  const c = mobilBewerten({ country: 'DE', priceEuro: 1899 }, sum);
+  const d = mobilBewerten({ country: 'DE', priceEuro: null, priceRaw: 'kein Preis' }, sum);
+  const faelle = [
+    ['mobilBewerten: 1709 vs 1899 = 10 %, schlaegt Peru', a.savingsPct === 10 && a.relevant && a.beatsBestCountry && !a.implausible],
+    ['mobilBewerten: 100 ist unplausibel', b.implausible && b.priceEuro === null && b.savingsPct === null],
+    ['mobilBewerten: gleicher Preis = kein Fund', c.savingsPct === 0 && !c.relevant && !c.beatsBestCountry],
+    ['mobilBewerten: kein Preis -> keine Bewertung, kein Fehler', d.priceEuro === null && !d.implausible && d.relevant === false],
+    ['mobilBewerten: ohne Zeile -> null', mobilBewerten(null, sum) === null],
+  ];
+  for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n); }
+}
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
