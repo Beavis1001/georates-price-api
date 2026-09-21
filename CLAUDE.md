@@ -42,7 +42,9 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
    Kommentaren werden erfunden, nie aus dem Log kopiert. Am 17.09.2026 hat ein Besucher seine
    eigene Suche im Quelltext wiedererkannt. Der Leck-Check findet Booking-Links, Tracking-Parameter,
    Reisedaten und Token-Muster; eine bewusste Ausnahme braucht `// leck-check-ok: <Begruendung>` in
-   derselben Zeile.
+   derselben Zeile. Gilt auch fuer `OFFEN.md`, README und Commit-Nachrichten: Ein Befund wird als
+   "ein Hotel in Muenchen, eine Nacht Ende September" notiert, Hotelname plus genauer Reisezeitraum
+   steht nur im Log. Am 21.09.2026 standen drei solche Suchen in `OFFEN.md`.
 2. **Keine Zugangsdaten im Code**, auch nicht als Beispiel. Alles ueber Vercel-Umgebungsvariablen
    (Tabelle im README). Das Repo ist oeffentlich, die Historie auch.
 3. **Keine Live-Abrufe gegen Booking aus einer Session** ohne ausdruckliche Freigabe des Betreibers.

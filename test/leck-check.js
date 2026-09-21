@@ -24,6 +24,11 @@ const MUSTER = [
     hinweis: 'Sieht nach einem Token aus - pruefen.' },
   { name: 'ID der Log-Tabelle',       re: /1clTIr0cwbHcixAuIsulJc5HrIHWuMw-Zhu6c9A8cQH4/g,
     hinweis: 'Die Google-Tabelle mit allen Abfragen - nicht oeffentlich verlinken.' },
+  // 21.09.2026: In OFFEN.md standen drei echte Suchen mit Hotelname und Reisezeitraum. Doku ist
+  // genauso oeffentlich wie Code. Konkrete Reisezeitraeume (14.-21.12.2026) haben in Doku nichts
+  // verloren; "eine Woche im Dezember" reicht, den Rest weiss das Log.
+  { name: 'Reisezeitraum in Doku',    re: /\b\d{1,2}\.\s?[-\u2013]\s?\d{1,2}\.\d{1,2}\.20\d\d\b/g,
+    hinweis: 'Hotel plus genauer Reisezeitraum identifiziert einen Besucher. Zeitraum vage halten.', nurIn: /\.md$/i },
   { name: 'E-Mail-Adresse (ausser info@)', re: /\b[A-Za-z0-9._%+-]+@(?!georates\.tech)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
     hinweis: 'Fremde Adresse im Code?', nurIn: /\.(js|html|json|webmanifest)$/i },
 ];
