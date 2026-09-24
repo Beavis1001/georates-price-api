@@ -8,6 +8,7 @@
 // 24.09.2026 noch mit Link gespeichert wurden.
 
 const store = require('../lib/store');
+const parser = require('../lib/parser');
 const { setCors } = require('../lib/http');
 
 module.exports = async (req, res) => {
@@ -19,6 +20,25 @@ module.exports = async (req, res) => {
   if (!/^[A-Za-z0-9_-]{12}$/.test(id)) { res.status(400).json({ success: false, reason: 'invalid_id' }); return; }
   const payload = await store.resultLesen(id);
   if (!payload) { res.status(404).json({ success: false, reason: 'not_found' }); return; }
+  const neutral = ohneNutzerpreis(payload);
   res.setHeader('Cache-Control', 'public, s-maxage=3600');
-  res.status(200).json({ ...payload, resultId: id, fromPermalink: true });
+  res.status(200).json({ ...neutral, resultId: id, fromPermalink: true });
 };
+
+// Eintraege von vor dem 24.09.2026 tragen noch den Preis, den der erste Suchende eingetippt hat
+// (siehe check-price.js). Beim Ausliefern entfernen und die Auswertung neu gegen unseren eigenen
+// Messwert rechnen - sonst liest jeder Empfaenger "Dein Preis" mit der Zahl eines Fremden.
+function ohneNutzerpreis(payload) {
+  if (payload.userPriceEuro == null || !Array.isArray(payload.results)) return payload;
+  const { userPriceEuro: _u, userPriceDiffers: _d, ...rest } = payload;
+  const neu = parser.summarize(rest.results, rest.baselineCountry, {});
+  const out = { ...rest, ...neu };
+  delete out.userPriceEuro; delete out.userPriceDiffers;
+  if (rest.mobile) {
+    const bestaetigung = rest.mobile.confirmation;
+    out.mobile = parser.mobilBewerten(rest.mobile, out);
+    if (out.mobile && bestaetigung) out.mobile.confirmation = bestaetigung;
+  }
+  return out;
+}
+module.exports.ohneNutzerpreis = ohneNutzerpreis;

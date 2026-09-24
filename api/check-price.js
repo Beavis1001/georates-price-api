@@ -599,8 +599,12 @@ module.exports = async (req, res) => {
       const hotelName = cfg.hotelNameAusTitel(titelAusgangsland) || cfg.hotelNameAusLink(linkFuerName);
       // Permalink: dasselbe Ergebnis ohne Link und ohne Zimmername-Freitext, aber mit dem, was
       // ein Empfaenger zum Einordnen braucht (Hotelname, Hotelland, Zimmer, Verpflegung).
+      // NEUTRAL wie der Cache, also ohne eingetragenen Nutzerpreis: Die Kurz-ID haengt am
+      // Cache-Schluessel und ist fuer dieselbe Suche bei ALLEN gleich. Bis zum 24.09.2026 stand im
+      // Link der Preis, den der ERSTE Suchende eingetippt hatte - jeder spaetere Besucher derselben
+      // Suche las dort "Dein Preis (1.091 EUR)", obwohl er nichts eingetragen hatte.
       await store.resultSpeichern(resultId, {
-        ...summary, partial, countries: laender,
+        ...neutralSummary, partial, countries: laender,
         hotelName, hotelLand: cfg.hotelLandAusLink(linkFuerName),
         room, board, cancel, device: deviceLabel, datum: new Date().toISOString().slice(0, 10),
       });
