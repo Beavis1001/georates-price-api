@@ -643,7 +643,7 @@ module.exports = async (req, res) => {
           + (eingabe.userPriceEuro !== null ? ` · Nutzerpreis ${eingabe.userPriceEuro}` : '')
           + (PARTNER_PARAMS_ENTFERNEN ? ' · ohne aid/label' : '')
           // Smartphone-Zeile: Preis und Vorsprung, sonst "-" (nicht gelesen oder unplausibel).
-          + (MOBILE_CHECK ? ` · Mobil ${summary.mobile && summary.mobile.priceEuro != null ? `${summary.mobile.priceEuro} (${summary.mobile.savingsPct} %${summary.mobile.confirmation && summary.mobile.confirmation.done ? (summary.mobile.confirmation.stable ? ', bestätigt' : ', NICHT stabil') : ''})` : '-'}` : ''),
+          + (MOBILE_CHECK ? ` · Mobil ${summary.mobile && summary.mobile.priceEuro != null ? `${summary.mobile.priceEuro} (${summary.mobile.savingsPct} %${summary.mobile.confirmation && summary.mobile.confirmation.done ? (summary.mobile.confirmation.stable ? ', bestätigt' : ', NICHT stabil') : ''}${summary.mobile.schwankt ? `, schwankt ab ${summary.mobile.bestSeenEuro}` : ''})` : '-'}` : ''),
       });
       // Best-of nur bei echten Funden und nur anonymisiert (siehe lib/store.js).
       const nichtStabil = confirmation && confirmation.done && !confirmation.stable;

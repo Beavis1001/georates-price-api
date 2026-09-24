@@ -284,6 +284,22 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   ];
   for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n); }
 }
+// 24.09.2026, nachgestellt nach einem echten Lauf (Zahlen gerundet uebernommen, Hotel egal):
+// Handy 188 / 209 (Mobile Rate nur in einer Sitzung), Desktop 209,10 / 209,10 / 194,56.
+{
+  const sum = { success: true, baselineUsedEuro: 194.56, baselineSamples: [209.1, 209.1, 194.56], best: { country: 'IN', priceEuro: 187.38 } };
+  const e = mobilBewerten({ country: 'DE', priceEuro: 209, priceLocal: 209, currency: 'EUR', samples: [188, 209], deals: ['mobile'] }, sum);
+  const f = mobilBewerten({ country: 'DE', priceEuro: 188, currency: 'EUR', samples: [188, 188.5], deals: ['mobile'] }, sum);
+  const g = mobilBewerten({ country: 'DE', priceEuro: 300, currency: 'EUR', samples: [300, 188] }, sum);
+  const faelle = [
+    ['Schwankung: 209 nicht mehr als Lesefehler ausgeblendet', !e.implausible && e.priceEuro === 209 && e.priceLocal === 209],
+    ['Schwankung: gemeldet, bester Handy-Preis 188', e.schwankt === true && e.bestSeenEuro === 188 && e.bestSeenSavingsPct === 3.4],
+    ['Schwankung: vorsichtiger Preis ist kein Fund', e.relevant === false],
+    ['stabil (188 / 188,50): keine Schwankung', f.schwankt === false && f.bestSeenEuro === null && f.relevant === true],
+    ['unplausible Einzelprobe (300) wird ignoriert, 188 zaehlt', !g.implausible && g.priceEuro === 188 && g.schwankt === false],
+  ];
+  for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | mobil '+n); }
+}
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
