@@ -10,6 +10,10 @@ const { setCors } = require('../lib/http');
 
 const TAGE = 45;       // Zeitraum
 const ANZAHL = 8;      // Eintraege in der Antwort
+// Eintraege, die keine echten Besucher-Funde sind, per Ergebnis-ID ausblenden. Die Liste in
+// Upstash bleibt unangetastet (dort schreibt nur der Preis-Check).
+// A6b4UgmrL0KM: Gegenprobe des Betreibers fuer den Smartphone-Preis am 24.09.2026, kein Besucher.
+const AUSGEBLENDET = new Set(['A6b4UgmrL0KM']);
 
 module.exports = async (req, res) => {
   setCors(res, 'GET, OPTIONS');
@@ -21,7 +25,7 @@ module.exports = async (req, res) => {
   // Pro Hotel nur der beste Eintrag, sonst steht ein beliebtes Hotel achtmal in der Liste.
   const proHotel = new Map();
   for (const e of alle) {
-    if (!e || !e.datum || e.datum < seit || !(e.pct > 0)) continue;
+    if (!e || !e.datum || e.datum < seit || !(e.pct > 0) || AUSGEBLENDET.has(e.resultId)) continue;
     const key = `${e.hotelLand}|${e.hotel}`;
     if (!proHotel.has(key) || proHotel.get(key).pct < e.pct) proHotel.set(key, e);
   }

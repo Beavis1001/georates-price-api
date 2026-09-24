@@ -36,6 +36,7 @@ const stubBrowser = {
       priceLocal: preis, priceEuro: preis, transferBytes: 1024 * 1024,
       deals: mobil ? ['mobile'] : (country === 'CO' ? ['online_payment'] : []),
       device: mobil ? 'Android/Smartphone' : 'Windows/Desktop', mobile: mobil || undefined,
+      pageTitle: 'Hotel Beispiel, Beispielstadt (aktualisierte Preise)',
     };
   },
 };
@@ -99,6 +100,7 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   ok('baselineSamples in der Zusammenfassung', Array.isArray(r.body.baselineSamples));
   ok('Sieger Kolumbien, 11 % aus USD umgerechnet = Fund (>= 3 %)', r.body.best.country === 'CO' && r.body.relevantSaving === true && r.body.relevantThresholdPct === 3, r.body.savingsPct + ' %');
   ok('VPN-Empfehlung ab 10 %', r.body.recommendVpnCountry === 'CO');
+  ok('Seitentitel nicht in der Antwort', r.body.results.every((x) => x.pageTitle === undefined));
   ok('resultId und Laenderliste in der Antwort', /^[A-Za-z0-9_-]{12}$/.test(r.body.resultId) && Array.isArray(r.body.countries));
 
   // Streuung im Ausgangsland: zweite Stichprobe zeigt 900 -> gegen 900 gerechnet -> CO (890) unter 3 %
@@ -133,6 +135,7 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   ok('Stream: meta zuerst, summary zuletzt', zeilen[0].type === 'meta' && zeilen[zeilen.length - 1].type === 'summary');
   ok('Stream: 15 Laenderzeilen (Ausgangsland nur einmal)', zeilen.filter((z) => z.type === 'country').length === 15);
   ok('Stream: Bestaetigung als update-Zeilen', zeilen.filter((z) => z.type === 'update').length === 2);
+  ok('Stream: kein Seitentitel in den Zeilen', zeilen.every((z) => !z.result || z.result.pageTitle === undefined));
   ok('Stream: NDJSON-Header gesetzt', /ndjson/.test(r.headers['content-type']));
   ok('Stream: Smartphone-Zeile als Typ mobile (Abruf + Bestaetigung)', zeilen.filter((z) => z.type === 'mobile').length === 2 && zeilen.find((z) => z.type === 'mobile').result.mobile === true);
 

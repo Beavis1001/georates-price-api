@@ -408,7 +408,7 @@ module.exports = async (req, res) => {
     // Ergebnis eines Landes ohne die Diagnose-Zimmerliste streamen (die wuerde ein Fehlschlag
     // sonst 15x durch die Leitung schicken).
     const streamCountry = (r, typ) => {
-      const { diagnose, ...fuerDieTabelle } = r;
+      const { diagnose, pageTitle, ...fuerDieTabelle } = r;
       streamSend({ type: typ || 'country', result: fuerDieTabelle });
     };
     // Mehrere Stichproben eines Landes zu EINER Zeile zusammenfuehren. Booking teilt Preise pro
@@ -579,7 +579,10 @@ module.exports = async (req, res) => {
 
     // Die Zimmerliste haengt jetzt einmal an summary.diagnose; an den einzelnen Laendern
     // waere sie nur Ballast in der Antwort (und im Cache).
-    for (const r of results) delete r.diagnose;
+    // Seitentitel des Ausgangslandes merken (fuer den Hotelnamen), dann aus allen Zeilen entfernen:
+    // In Antwort, Cache und Permalink hat er nichts zu suchen.
+    const titelAusgangsland = (results.find((r) => r.country === baselineCountry && r.pageTitle) || results.find((r) => r.pageTitle) || {}).pageTitle || '';
+    for (const r of results) { delete r.diagnose; delete r.pageTitle; }
 
     const bytesGesamt = results.reduce((s, r) => s + (r.transferBytes || 0), 0);
     const payload = { ...summary, partial, resultId, countries: laender };
@@ -593,11 +596,12 @@ module.exports = async (req, res) => {
       // Name noch Land; am 20.09. stand deshalb ein namenloser Best-of-Eintrag in der Liste.
       const baseRowFuerLink = results.find((r) => r.country === baselineCountry);
       const linkFuerName = (baseRowFuerLink && baseRowFuerLink.finalUrl) || link;
+      const hotelName = cfg.hotelNameAusTitel(titelAusgangsland) || cfg.hotelNameAusLink(linkFuerName);
       // Permalink: dasselbe Ergebnis ohne Link und ohne Zimmername-Freitext, aber mit dem, was
       // ein Empfaenger zum Einordnen braucht (Hotelname, Hotelland, Zimmer, Verpflegung).
       await store.resultSpeichern(resultId, {
         ...summary, partial, countries: laender,
-        hotelName: cfg.hotelNameAusLink(linkFuerName), hotelLand: cfg.hotelLandAusLink(linkFuerName),
+        hotelName, hotelLand: cfg.hotelLandAusLink(linkFuerName),
         room, board, cancel, device: deviceLabel, datum: new Date().toISOString().slice(0, 10),
       });
       // Jede (neue) erfolgreiche Abfrage in die Google-Tabelle loggen - als Deal-Sammlung.
@@ -649,7 +653,7 @@ module.exports = async (req, res) => {
       const nichtStabil = confirmation && confirmation.done && !confirmation.stable;
       if (summary.relevantSaving && !nichtStabil && basePrice != null && ersparnisEuro != null) {
         await store.bestofSpeichern({
-          hotel: cfg.hotelNameAusLink(linkFuerName), hotelLand: cfg.hotelLandAusLink(linkFuerName),
+          hotel: hotelName, hotelLand: cfg.hotelLandAusLink(linkFuerName),
           land: best.country, baseline: baselineCountry,
           pct: summary.savingsPct, euro: ersparnisEuro, basisEuro: basePrice,
           umgerechnet: !!summary.convertedCurrency, datum: new Date().toISOString().slice(0, 10), resultId,
