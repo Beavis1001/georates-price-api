@@ -191,7 +191,18 @@ Einschalten, eine Handvoll Suchen fahren, Spalte Q und Status-MB vergleichen, da
 
 ---
 
+## Genius pro Land (neu, 24.09.2026)
+
+Hotels koennen Genius je Markt freigeben. Beim Rodos Park (6 Naechte, eingeloggt): deutsche
+Sitzung ohne Genius 2.117,59 EUR, US-Sitzung mit Genius 1.914,84 EUR (-9,6 %). Das Tool misst
+ausgeloggt und sieht nur "Genius Rabatt koennte verfuegbar sein". Moeglich: diesen Hinweis je
+Land als Plakette auslesen und im Ergebnis sagen "Genius in X angekuendigt, in Y nicht - Endpreis
+im Checkout vergleichen". Eingeloggte Konten sind keine Option.
+
 ## Geklaert, nicht mehr offen
+
+- **Belegung, feste Abgaben, Zimmergrenze** (24.09.): siehe CLAUDE.md. Die Rodos-Park-Funde
+  ueber die USA (Best-of 23./24.09.) waren mit Einzelbelegung und ohne Umweltabgabe gemessen.
 
 - **Permalinks ohne Booking-Link** (24.09.): `/api/result` lieferte an jeder Laenderzeile
   `finalUrl` mit Reisedaten und Sitzungsparametern der Suche, obwohl die Startseite "ohne
