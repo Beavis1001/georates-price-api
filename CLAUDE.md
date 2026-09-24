@@ -10,7 +10,7 @@ Historie und offene Punkte stehen NICHT hier, sondern in `OFFEN.md` und den Comm
 
 ## Was das ist
 
-Serverless-Endpunkt hinter georates.tech (Vercel, Node 20, `puppeteer-core` + headless Chromium).
+Serverless-Endpunkt hinter georates.tech (Vercel, Node 24, `puppeteer-core` + headless Chromium).
 Liest den Preis eines Booking.com-Zimmers ueber Proxy-Sitzungen aus 15 Laendern plus dem Land der
 Unterkunft und meldet, ob ein Land guenstiger ist. Betreiber: Christopher (GitHub Beavis1001).
 

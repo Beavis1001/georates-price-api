@@ -4,7 +4,7 @@
   "private": true,
   "description": "Serverless endpoint that tries to read the total price of a Booking.com hotel page for GeoRates. Best-effort automation - falls back to manual check when Booking.com blocks the request.",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "dependencies": {
     "@sparticuz/chromium-min": "148.0.0",
