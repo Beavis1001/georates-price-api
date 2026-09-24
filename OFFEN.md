@@ -151,16 +151,21 @@ ausserhalb 50-105 % des Desktop-Preises), Bestaetigung per zweitem Abruf, Stream
 `summary.mobile`, Frontend zeigt eine Zeile "Deutschland · Smartphone" und einen Hinweis ohne
 VPN-Schritt. Handler- und Parser-Tests decken den Ablauf mit Stub und erfundener Fixture ab.
 
-**Offen ist die Validierung gegen die echte mobile Seite** - der Parser ist aus dem Screenshot
-abgeleitet. Vorgehen (kostet zwei, drei Abrufe):
+**Parser am 24.09. gegen echte mobile Seiten geprueft** (Android-Kennung im Browser, deutsche
+Sitzung, zwei Berliner Hotels, 19 Tarifkarten, ohne Proxy). Ergebnis:
 
-1. Debug-Abruf `mode: 'rooms'` mit `device: 'android'`, `debugRoom: '<Zimmer>'`, `debugLines: 160`
-   und Header `X-GeoRates-Debug`. Pruefen, ob im Text "Preis fuer N Naechte:" steht und darunter die
-   Betragszeilen wie im Screenshot ("€ 1.899", "€ 1.709"). Weicht der Wortlaut ab, `MOBILE_TOTAL_RE`,
-   `MOBILE_CARD_END_RE` und die Fixture in test/parser-test.js anpassen.
-2. Klaeren, ob der mobile Preis Steuern/Gebuehren enthaelt. Die Karte sagt nur "Es koennen
-   zusaetzliche Gebuehren anfallen"; der Streichpreis 1.899 entsprach dem Desktop-Endpreis, was
-   fuer "inklusive" spricht. Wenn nicht: `extractExclusiveTaxPct`-Logik auch im Mobil-Pfad anwenden.
+1. Wortlaut passt: Anker "Preis fuer N Naechte:", Kartenende "Reservieren". ABER: Bei der Mobile
+   Rate stehen Streichpreis und Preis in EINER Zeile ("€ 246 € 188"), darunter "Originalpreis …
+   Aktueller Preis …". Die erste Fassung fand deshalb genau die Handy-Rabatte nie. Behoben, Fixture
+   mit echter Struktur (erfundene Namen) in test/parser-test.js.
+2. Steuern: Jede Karte sagt "Einschliesslich Steuern und Gebuehren". Mobil- und Desktop-Preis sind
+   direkt vergleichbar.
+3. Gegenprobe gleiches Zimmer, gleicher Tarif: Desktop 209 EUR, Handy 188 EUR (-10 %); mit
+   Fruehstueck 233 zu 210 (-9,9 %). Der Hebel ist real.
+
+Noch nicht geprueft: ob die Sitzung ueber den Proxy (headless Chromium, Android-Profil) dieselbe
+Mobile Rate bekommt wie ein echter Browser. Das zeigt erst Schritt 3.
+
 3. `MOBILE_CHECK=1` in Vercel setzen, fuenf Suchen, Spalte P ("Mobil ...") mit dem eigenen Handy
    vergleichen. Stimmt es, Flag stehen lassen; die Datenschutzerklaerung braucht keine Aenderung
    (gleicher Zweck, gleiche Daten).

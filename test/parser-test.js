@@ -237,6 +237,30 @@ pruefeMobil('Mobil: kostenlos stornierbar -> zweite Karte', mobil,'Doppelzimmer 
 pruefeMobil('Mobil: naechstes Zimmer nicht vermischt', mobil,'Suite mit Meerblick','uebernachtung','unsicher','2.400','');
 pruefeMobil('Mobil: Zimmer nicht auf der Seite -> null', mobil,'Penthouse','egal','unsicher','null');
 pruefeMobil('Mobil-Parser auf Desktop-Seite -> null (nie raten)', bt,'Superior Double Room with Harbour View','uebernachtung','unsicher','null');
+
+// --- 24.09.: Echte mobile Struktur (Hotelnamen, Preise und Daten erfunden) ----------------
+// So sieht die Karte auf booking.com mit Android-Kennung wirklich aus. Ohne Rabatt steht der
+// Preis zweimal ("€ X" und "Preis € X"); mit Mobile Rate stehen Streichpreis und Preis in EINER
+// Zeile, darunter die Vorleser-Zeile "Originalpreis ... Aktueller Preis ...".
+const mobilEcht = ['4 Ergebnisse','Kleines Doppelzimmer','Bett: 1 Doppelbett','14 m²','Kostenfreies WLAN',
+ 'Preiswert','Preis für:','max. Personenzahl: 2','Nicht kostenlos stornierbar','•','Online-Zahlung',
+ 'Preis für 3 Nächte:','€ 312','Preis € 312','Einschließlich Steuern und Gebühren','Reservieren',
+ 'Flexibel','Preis für:','max. Personenzahl: 2','Kostenlose Stornierung vor 12:00 Uhr am 3. März 2027',
+ 'Keine Vorauszahlung notwendig – Zahlen Sie in der Unterkunft',
+ 'Preis nur für Mobilgerätnutzer','Preis für 3 Nächte:','€ 366 € 281','Originalpreis € 366 Aktueller Preis € 281',
+ 'Einschließlich Steuern und Gebühren','Reservieren',
+ 'Wir haben noch 1','Melden Sie sich an, um zu sehen, ob Genius-Rabatte gelten',
+ 'Kleines Doppelzimmer mit Hofblick','Bett: 1 Doppelbett','16 m²',
+ 'Flexibel + Frühstück','Preis für:','max. Personenzahl: 2','Sehr gutes Frühstück im Preis inbegriffen',
+ 'Kostenlose Stornierung vor 12:00 Uhr am 3. März 2027','Preis nur für Mobilgerätnutzer','Preis für 3 Nächte:',
+ '€ 1.402 € 1.078','Originalpreis € 1.402 Aktueller Preis € 1.078','Einschließlich Steuern und Gebühren','Reservieren',
+ 'Nachhaltigkeit'].join('\n');
+pruefeMobil('Echt: ohne Rabatt, Preis doppelt', mobilEcht,'Kleines Doppelzimmer','uebernachtung','nein','312','online_payment');
+pruefeMobil('Echt: Mobile Rate in einer Zeile -> aktueller Preis', mobilEcht,'Kleines Doppelzimmer','egal','ja','281','mobile');
+pruefeMobil('Echt: Mobile Rate mit Tausenderpunkt', mobilEcht,'Kleines Doppelzimmer mit Hofblick','fruehstueck','ja','1.078','mobile');
+pruefeMobil('Echt: Namensanfang gleich, Zimmer nicht vermischt', mobilEcht,'Kleines Doppelzimmer mit Hofblick','egal','unsicher','1.078','mobile');
+// egal/unsicher nimmt wie am Desktop die ERSTE Karte, nicht die billigste (waehleStufe).
+pruefeMobil('Echt: egal/unsicher -> erste Karte (wie Desktop)', mobilEcht,'Kleines Doppelzimmer','egal','unsicher','312','online_payment');
 {
   const [amt] = findRoomPrice(mobil,'Doppelzimmer mit Balkon','egal','unsicher');
   const ok = amt === null || amt === undefined; if(!ok) fehler++;
