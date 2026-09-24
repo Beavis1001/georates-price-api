@@ -79,6 +79,9 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
 - **Schwellen:** Unterschied ab 1 % = Fund, ab 10 % = VPN-Empfehlung. Musste der Bestpreis von uns
   umgerechnet werden (andere Waehrung als das Ausgangsland), gilt 3 % statt 1 %, weil Booking mit
   eigenem Kurs verkauft (`RELEVANT_SAVINGS_PCT_CONVERTED`).
+- **"egal" heisst "guenstigster"** (Betreiber-Entscheidung 24.09.2026). `waehleStufe` nimmt innerhalb
+  jeder Prioritaetsstufe den guenstigsten passenden Tarif, nicht den ersten auf der Seite. Gilt fuer
+  Desktop und Mobil gleich, sonst vergleicht man verschiedene Tarife.
 - **Es werden immer alle Laender geprueft.** Der fruehe Abbruch bei "Kolumbien 10 % guenstiger" wurde
   entfernt, er hat die eigene Statistik verzerrt. Einzige Ausnahme: Zimmer steht gar nicht auf der Seite.
 - **Ein nacktes `$` ist nie USD** (`CURRENCY_SYMBOLS`). Argentinien, Mexiko, Kolumbien schreiben ihre
