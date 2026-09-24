@@ -353,5 +353,14 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   console.log((ok2?'OK  ':'FEHL')+' | Link: 2 Erwachsene, 6 Naechte; ohne Angaben 2 / 0');
 }
 
+// Genius-Hinweis als eigene Plakette (24.09.2026), nicht als allgemeiner "Deal"
+{
+  const t = ['Zimmerkategorie','Beispielzimmer','Bett: 1 Doppelbett','Zimmer','20 m²',
+   'max. Personenzahl: 2','€ 500','€ 400','Originalpreis € 500 Aktueller Preis € 400','Einschließlich Steuern und Gebühren','20% sparen','Frühstück inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Rabatt könnte verfügbar sein','Zimmer auswählen','Ende'].join('\n');
+  const r = findRoomPrice(t, 'Beispielzimmer', 'egal', 'unsicher', { adults: 2 });
+  const ok = r[0] === '400' && JSON.stringify(r[6]) === '["genius_hint"]'; if (!ok) fehler++;
+  console.log((ok?'OK  ':'FEHL')+' | Genius-Hinweis -> Plakette genius_hint statt deal'+(ok?'':' -> '+JSON.stringify(r)));
+}
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
