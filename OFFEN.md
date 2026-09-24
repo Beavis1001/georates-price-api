@@ -45,8 +45,13 @@ Auf den Cent identisch, also kein Laenderunterschied. Unser Tool hatte 2,2 % gem
 Zwei Reparaturen:
 
 - **Richtig:** Bookings eigene Zeile „In der Waehrung der Unterkunft: € X" auslesen statt
-  selbst umzurechnen. Ungeprueft ist, ob diese Zeile auch auf der Zimmerliste steht oder
-  nur im Buchungsvorgang.
+  selbst umzurechnen. **Geprueft am 24.09.2026: Die Zeile steht NUR im Buchungsvorgang**
+  (Checkout), nicht auf der Zimmerliste - in drei Faellen (US-, INR- und EUR-Sitzung). Auf der
+  Hotelseite steht nur "Preise umgerechnet in INR". Auslesen hiesse, fuer jedes Land bis in den
+  Checkout zu gehen: mehr Traffic, und der Checkout verlangt Kontaktdaten. Nicht verfolgen.
+  Gute Nachricht dazu: Bei einer Villa auf Fuerteventura (INR-Sitzung) lag unsere Umrechnung mit
+  Marktkurs 1,23 EUR (0,05 %) neben Bookings eigenem Kurs; der Scheinfund-Effekt tritt vor allem
+  dort auf, wo Booking in Fremdwaehrung VERKAUFT (USD-Sitzung eines EUR-Hotels), nicht bloss anzeigt.
 - **Schnell und sicher (umgesetzt, Audit):** Musste fuer ein Land umgerechnet werden,
   gilt die 1-%-Schwelle nicht, sondern 3 % (`RELEVANT_SAVINGS_PCT_CONVERTED`). Die Antwort traegt
   `relevantThresholdPct` und `convertedCurrency`, das Frontend nennt die angewandte Schwelle.
