@@ -23,7 +23,9 @@ aufwendig, und Forks, Caches und Mirrors erreicht er ohnehin nicht.
 
 ## 2. Eigene Waehrungsumrechnung erzeugt Scheinfunde (~2 %)
 
-**Belegt am 19.09. am Three House Hotel, Funchal, 14.–21.12.2026.**
+**Belegt am 19.09. an einem Hotel auf Madeira, eine Woche im Dezember 2026.** (Hotelname und
+genauer Reisezeitraum stehen im Log, nicht hier: Hotel plus Zeitraum passt selten auf mehr als eine
+Person, siehe Regel 1 in CLAUDE.md.)
 
 Booking rechnet ein Hotel in der Waehrung der Unterkunft aus und verkauft es in einer
 fremden Laendersitzung in deren Waehrung — mit eigenem Kurs und Aufschlag. Wir lesen den
@@ -54,13 +56,14 @@ Zwei Reparaturen:
   werden. Nachteil: Die Spalte "Preis vor Ort" taugt dann nicht mehr zur VPN-Kontrolle. Braucht
   einen Live-Vergleich an zwei, drei Hotels, bevor es umgestellt wird.
 
-Nicht betroffen sind Funde, bei denen Booking selbst Euro ausgewiesen hat — z. B. Emanuel
-Derag Muenchen (477,40 € gegen 423,86 € ueber Japan, per VPN bis in die Buchungsmaske
-geprueft) und Le Nid Douillet (9,1 %).
+Nicht betroffen sind Funde, bei denen Booking selbst Euro ausgewiesen hat — z. B. ein Hotel in
+Muenchen (477,40 € gegen 423,86 € ueber Japan, per VPN bis in die Buchungsmaske geprueft) und ein
+Fund mit 9,1 %. Beide stehen mit Namen im Best-of, das bewusst ohne Reisezeitraum auskommt.
 
 ## 3. Tarifzeilen einer Zimmerkarte werden nicht gefunden
 
-**Ruby Lilly Muenchen, Zimmer „Rubys Choice – Zimmer mit Upgrade", 26.–27.09.2026.**
+**Ein Hotel in Muenchen, Upgrade-Zimmer mit zwei Tarifen, eine Nacht Ende September 2026.**
+(Link und Zimmername stehen im Log, Spalte des Zimmers, Zeile vom 19.09.)
 
 Das Zimmer hat zwei Tarife (539 € ohne, 583 € mit Fruehstueck, beide kostenlos
 stornierbar), der Parser findet keinen davon. Ursache liegt nicht im Link.
@@ -191,7 +194,7 @@ Einschalten, eine Handvoll Suchen fahren, Spalte Q und Status-MB vergleichen, da
 - **Eingabegrenzen und generische Fehlermeldung** (Audit): Link 2048, Zimmer 200 Zeichen,
   Whitelist fuer Verpflegung/Storno; `err.message` geht nicht mehr an den Client.
 
-- **Genius-Rabatt ist in allen Laendersitzungen gleich hoch** (Three House, 19.09.:
+- **Genius-Rabatt ist in allen Laendersitzungen gleich hoch** (Madeira-Hotel aus Punkt 2, 19.09.:
   −144,90 USD entsprechen exakt −126,42 EUR). Ausgeloggte Messungen bleiben also
   aussagekraeftig, obwohl man zum Buchen eingeloggt sein muss.
 - **Genius wird auch ausgeloggt von der Gesamtsumme abgezogen** (17.09.). Wird seit dem
