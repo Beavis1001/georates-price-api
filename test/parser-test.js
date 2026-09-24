@@ -313,5 +313,41 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n); }
 }
 
+// --- 24.09.2026: US-Sitzung eines griechischen Hotels (Aufbau nach echten Screenshots; Namen und
+// Betraege erfunden). Belegung pro Tarif, Prozent-Steuern PLUS feste Abgabe in EUR, Partnerangebot
+// mit Steuer pro Aufenthalt in englischer Schreibweise, danach ein billigeres Nachbarzimmer.
+{
+  const { extractFixedFees, extractExclusiveTaxPct } = require('../lib/parser');
+  const us = ['Zimmerkategorie',
+   'Deluxe Doppelzimmer','Wir haben noch 4','Bett: 1 großes Doppelbett','Ein ruhiges Zimmer mit Blick.','Zimmer','24 m²','Balkon',
+   'max. Personenzahl: 2','Preis US$1.500','Inbegriffen: € 89.83 Resortgebühr pro Aufenthalt','Nicht inbegriffen: € 160.00 Steuer pro Aufenthalt','Außergewöhnliches Frühstück inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Im Voraus zahlen','Partnerangebot','Zimmer auswählen',
+   'max. Personenzahl: 2','US$2.000','Preis US$1.520','26% sparen','Nicht inbegriffen: 13 % Mehrwertsteuer, € 15 Umweltabgabe pro Nacht, 0,5 % Übernachtungssteuer','Außergewöhnliches Frühstück inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Zimmer auswählen',
+   'max. Personenzahl: 2','US$2.700','Preis US$2.000','26% sparen','Nicht inbegriffen: 13 % Mehrwertsteuer, € 15 Umweltabgabe pro Nacht, 0,5 % Übernachtungssteuer','Frühstück & Abendessen inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Zimmer auswählen',
+   'max. Personenzahl: 1','Nur für 1 Gast','US$2.400','Preis US$1.770','26% sparen','Nicht inbegriffen: 13 % Mehrwertsteuer, € 15 Umweltabgabe pro Nacht, 0,5 % Übernachtungssteuer','Frühstück & Abendessen inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Zimmer auswählen',
+   'Kleines Doppelzimmer Hofseite','Wir haben noch 2','Bett: 1 Doppelbett','Ein kleines Zimmer.','Zimmer','16 m²',
+   'max. Personenzahl: 2','US$1.400','Preis US$1.000','26% sparen','Nicht inbegriffen: 13 % Mehrwertsteuer, € 15 Umweltabgabe pro Nacht, 0,5 % Übernachtungssteuer','Frühstück & Abendessen inbegriffen','Kostenlose Stornierung vor dem 1. März 2027','Zimmer auswählen',
+   'Nachhaltigkeit'].join('\n');
+  const hp2 = findRoomPrice(us, 'Deluxe Doppelzimmer', 'halbpension', 'unsicher', { adults: 2 });
+  const hp1 = findRoomPrice(us, 'Deluxe Doppelzimmer', 'halbpension', 'unsicher', { adults: 1 });
+  const egal = findRoomPrice(us, 'Deluxe Doppelzimmer', 'egal', 'unsicher', { adults: 2 });
+  const fees = extractFixedFees(hp2[1]);
+  const partnerFees = extractFixedFees(egal[1]);
+  const faelle = [
+    ['US: Halbpension 2 Personen -> 2.000, nicht der 1-Personen-Tarif', hp2[0] === '2.000', hp2[0]],
+    ['US: 1 Person -> 1-Personen-Tarif 1.770', hp1[0] === '1.770', hp1[0]],
+    ['US: egal -> Partnerangebot 1.500, nicht das billigere Nachbarzimmer (1.000)', egal[0] === '1.500', egal[0]],
+    ['US: Prozente 13 + 0,5', extractExclusiveTaxPct(hp2[1]) === 13.5],
+    ['US: feste Abgabe € 15 pro Nacht erkannt', fees.length === 1 && fees[0].amount === 15 && fees[0].curTok === '€' && fees[0].einheit === 'nacht', JSON.stringify(fees)],
+    ['US: Partner-Steuer € 160.00 pro Aufenthalt, Resortgebühr (inbegriffen) ignoriert', partnerFees.length === 1 && partnerFees[0].amount === 160 && partnerFees[0].einheit === 'aufenthalt', JSON.stringify(partnerFees)],
+    ['Ohne Personenangabe bleibt alles wie bisher', findRoomPrice(us, 'Deluxe Doppelzimmer', 'halbpension', 'unsicher')[0] === '1.770'],
+  ];
+  for (const [n, ok, info] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n+(ok?'':'  -> '+info)); }
+  const { sucheAusLink } = require('../lib/browser');
+  const s1 = sucheAusLink('https://www.booking.com/hotel/xx/beispiel.de.html?checkin=2027-03-01&checkout=2027-03-07&group_adults=2'); // leck-check-ok: erfundenes Hotel
+  const s2 = sucheAusLink('https://www.booking.com/hotel/xx/beispiel.de.html'); // leck-check-ok: erfundenes Hotel
+  const ok2 = s1.adults === 2 && s1.nights === 6 && s2.adults === 2 && s2.nights === 0; if (!ok2) fehler++;
+  console.log((ok2?'OK  ':'FEHL')+' | Link: 2 Erwachsene, 6 Naechte; ohne Angaben 2 / 0');
+}
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);

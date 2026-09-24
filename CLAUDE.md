@@ -82,6 +82,20 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
 - **"egal" heisst "guenstigster"** (Betreiber-Entscheidung 24.09.2026). `waehleStufe` nimmt innerhalb
   jeder Prioritaetsstufe den guenstigsten passenden Tarif, nicht den ersten auf der Seite. Gilt fuer
   Desktop und Mobil gleich, sonst vergleicht man verschiedene Tarife.
+- **Belegung zaehlt** (24.09.2026). Vor jedem Tarif steht "max. Personenzahl: N" / "Nur fuer N Gast";
+  Tarife fuer weniger Personen als `group_adults` im Link fliegen raus (`passendeBelegung`). Ohne
+  das gewann bei "egal" der billigere Einzelbelegungs-Tarif. Die Tarifliste endet am naechsten
+  Zimmer ("Zimmer auswaehlen" gefolgt von "m²" vor dem naechsten Preis), sonst koennte ein
+  billigeres Nachbarzimmer gewinnen.
+- **Feste Abgaben** ("Nicht inbegriffen: 13 %, € 15 Umweltabgabe pro Nacht, 0,5 %", Partner:
+  "€ 159.03 Steuer pro Aufenthalt") werden ZUSAETZLICH zu den Prozenten addiert, in der Waehrung
+  der Abgabe (oft die der Unterkunft) ueber Euro umgerechnet; pro Nacht x Naechte aus dem Link.
+  Nicht bei einem Gesamtbetrag "zzgl. X Steuern und Gebuehren" (sonst doppelt).
+- **Genius haengt am Land der Sitzung, und unsere Sitzungen sind ausgeloggt** (24.09.2026, Rodos
+  Park): eingeloggt gab die deutsche Sitzung KEINEN Genius-Rabatt, die US-Sitzung 310,88 USD -
+  Endpreis ueber die USA 9,6 % guenstiger, obwohl der Zimmerpreis dort hoeher war. Das Tool sieht
+  diesen Hebel nicht. Eingeloggte Booking-Konten fuer das Tool: nein (Nutzungsbedingungen,
+  Sperrrisiko).
 - **Es werden immer alle Laender geprueft.** Der fruehe Abbruch bei "Kolumbien 10 % guenstiger" wurde
   entfernt, er hat die eigene Statistik verzerrt. Einzige Ausnahme: Zimmer steht gar nicht auf der Seite.
 - **Ein nacktes `$` ist nie USD** (`CURRENCY_SYMBOLS`). Argentinien, Mexiko, Kolumbien schreiben ihre
