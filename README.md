@@ -77,6 +77,8 @@ Umgebungsvariablen und nie im Code:
 | `BASELINE_SAMPLES` (Standard 2) | Wie oft das Ausgangsland parallel abgerufen wird; gerechnet wird gegen den niedrigsten Preis |
 | `CONFIRM_FINDS` (Standard an, `0` = aus) | Fund ueber der Schwelle einmal bestaetigen: Siegerland und Ausgangsland je ein weiterer Abruf |
 | `STRIP_PARTNER_PARAMS` | `1` = `aid` und `label` auch beim Abruf entfernen (Experiment zur Preisstreuung) |
+| `MOBILE_CHECK` (Standard aus) | `1` = Ausgangsland zusaetzlich einmal mit Smartphone-Profil abrufen und als eigene Zeile bewerten (Mobile Rate, oft 10 % unter allen Laendern). Experiment: Mobil-Parser noch nicht live validiert |
+| `MOBILE_DEVICE` (Standard `android`) | Geraeteprofil fuer den Smartphone-Abruf: `android` oder `iphone` |
 | `BROWSER_SHARED` | `1` = ein Chromium fuer alle Laender (Kontext je Proxy) statt ein Start je Land; noch nicht live gemessen |
 | `ALLOWED_ORIGIN` | CORS-Origin, Standard `https://georates.tech` |
 

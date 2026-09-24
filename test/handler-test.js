@@ -22,14 +22,20 @@ const stubBrowser = {
   deviceProfile: () => ({ label: 'Windows/Desktop' }),
   resolveDevice: () => 'windows',
   attemptFetch: async () => ({ bodyText: 'Zimmerkategorie\nDoppelzimmer\nPreis € 100\nEinschließlich Steuern und Gebühren\n' + 'x\n'.repeat(100), rooms: [{ name: 'Doppelzimmer', boards: ['uebernachtung'], cancels: ['ja'] }], loadedOk: true, transferBytes: 2048, err: null }),
-  fetchPrice: async (country) => {
-    aufrufe[country] = (aufrufe[country] || 0) + 1;
-    const folge = PREIS_FOLGE[country];
-    const preis = folge ? folge[Math.min(aufrufe[country] - 1, folge.length - 1)] : (PREISE[country] || null);
+  // Elftes Argument ist das Geraeteprofil. Der Smartphone-Abruf (MOBILE_CHECK) laeuft als eigener
+  // Zaehler "<Land>-mobil", damit die Stichproben-Folgen der Desktop-Abrufe unberuehrt bleiben.
+  fetchPrice: async (country, ...rest) => {
+    const device = rest[9] || 'windows';
+    const mobil = device === 'android' || device === 'iphone';
+    const key = mobil ? country + '-mobil' : country;
+    aufrufe[key] = (aufrufe[key] || 0) + 1;
+    const folge = PREIS_FOLGE[key];
+    const preis = folge ? folge[Math.min(aufrufe[key] - 1, folge.length - 1)] : (mobil ? 900 : (PREISE[country] || null));
     return {
       country, priceRaw: 'stub', currency: country === 'DE' ? 'EUR' : 'USD',
       priceLocal: preis, priceEuro: preis, transferBytes: 1024 * 1024,
-      deals: country === 'CO' ? ['online_payment'] : [],
+      deals: mobil ? ['mobile'] : (country === 'CO' ? ['online_payment'] : []),
+      device: mobil ? 'Android/Smartphone' : 'Windows/Desktop', mobile: mobil || undefined,
     };
   },
 };
@@ -42,6 +48,7 @@ delete process.env.TURNSTILE_SECRET_KEY;   // Bot-Check uebersprungen
 delete process.env.UPSTASH_REDIS_REST_URL; // kein Cache, keine Bremsen
 delete process.env.LOG_WEBHOOK_URL;
 process.env.DEBUG_SECRET = 'geheim';
+process.env.MOBILE_CHECK = '1';         // Smartphone-Abruf im Ausgangsland mitpruefen
 
 const handler = require('../api/check-price');
 
@@ -127,6 +134,37 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   ok('Stream: 15 Laenderzeilen (Ausgangsland nur einmal)', zeilen.filter((z) => z.type === 'country').length === 15);
   ok('Stream: Bestaetigung als update-Zeilen', zeilen.filter((z) => z.type === 'update').length === 2);
   ok('Stream: NDJSON-Header gesetzt', /ndjson/.test(r.headers['content-type']));
+  ok('Stream: Smartphone-Zeile als Typ mobile (Abruf + Bestaetigung)', zeilen.filter((z) => z.type === 'mobile').length === 2 && zeilen.find((z) => z.type === 'mobile').result.mobile === true);
+
+  // ---- Smartphone-Preis (MOBILE_CHECK) ------------------------------------------------------
+  // Standard-Stub: Desktop DE 1000, Smartphone 900 -> 10 % guenstiger, aber CO (890) bleibt bestes Land.
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  ok('Smartphone: 900 gegen 1000 = 10 %, relevant', r.body.mobile && r.body.mobile.priceEuro === 900 && r.body.mobile.savingsPct === 10 && r.body.mobile.relevant === true, JSON.stringify(r.body.mobile));
+  ok('Smartphone: Laendertabelle bleibt ohne Geraetezeile', r.body.results.every((x) => !x.mobile) && r.body.results.length === 15);
+  ok('Smartphone: schlaegt bestes Land NICHT (890 < 900)', r.body.mobile.beatsBestCountry === false);
+  ok('Smartphone: Fund einmal bestaetigt, stabil', aufrufe['DE-mobil'] === 2 && r.body.mobile.confirmation && r.body.mobile.confirmation.stable === true, JSON.stringify(r.body.mobile.confirmation));
+  ok('Smartphone: Deal-Plakette mobile', JSON.stringify(r.body.mobile.deals) === '["mobile"]');
+  // Smartphone schlaegt alle Laender
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = { 'DE-mobil': [850] };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  ok('Smartphone: 850 schlaegt bestes Land (890)', r.body.mobile.beatsBestCountry === true && r.body.mobile.savingsPct === 15 && r.body.best.country === 'CO', JSON.stringify(r.body.mobile));
+  // Los: zweiter Mobil-Abruf zeigt 1000 -> konservativ 1000, nicht stabil
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = { 'DE-mobil': [850, 1000] };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  ok('Smartphone: Los wird erkannt (850 -> 1000, nicht stabil)', r.body.mobile.priceEuro === 1000 && r.body.mobile.relevant === false && r.body.mobile.confirmation.stable === false && JSON.stringify(r.body.mobile.samples) === '[850,1000]', JSON.stringify(r.body.mobile));
+  // Unplausibel: 100 statt ~1000 -> verworfen, kein zweiter Abruf
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = { 'DE-mobil': [100] };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  ok('Smartphone: 100 gegen 1000 ist unplausibel -> verworfen', r.body.mobile.implausible === true && r.body.mobile.priceEuro === null && aufrufe['DE-mobil'] === 1, JSON.stringify(r.body.mobile));
+  // Nutzerpreis 950: Smartphone 900 -> 5,3 % gegen 950
+  for (const k of Object.keys(aufrufe)) delete aufrufe[k];
+  PREIS_FOLGE = {};
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', userPrice: '950' });
+  ok('Smartphone: gegen den Nutzerpreis gerechnet (900 vs 950 = 5,3 %)', r.body.mobile.savingsPct === 5.3, r.body.mobile.savingsPct);
 
   r = await call({ mode: 'rooms', link: LINK });
   ok('rooms-Modus liefert Zimmer', r.body.success === true && r.body.rooms[0].name === 'Doppelzimmer');

@@ -141,10 +141,40 @@ Urspruengliche Bedingungen, alle eingehalten:
 - Die Datenschutzerklaerung nennt als Zweck bisher nur Verbesserung und Auswertung.
   Veroeffentlichung ist ein weiterer Zweck und gehoert dort benannt.
 
-## 8. Mobiler Parser
+## 8. Smartphone-Preis live validieren (Experiment eingebaut, 21.09.)
 
-`MOBILE_READY = false`. Geraeteprofile fuer Android und iPhone sind vorhanden, das mobile
-Layout versteht der Parser aber nicht. Mobile Anfragen fallen auf Windows zurueck.
+Christophers Screenshot vom 21.09.: Am Handy stand fuer dasselbe Zimmer "Preis nur fuer
+Mobilgeraetnutzer" 1.709 statt 1.899 EUR - 10 % unter dem Desktop-Preis ALLER 16 Laender, ohne
+VPN. Das ist der groesste Einzelhebel, den das Tool bisher nicht sieht.
+
+Eingebaut hinter `MOBILE_CHECK=1` (Standard aus): ein zusaetzlicher Abruf des Ausgangslands mit
+Android-Profil, eigener Parser `findRoomPriceMobile` (lib/parser.js, Anker "Preis fuer N Naechte:",
+letzte Betragszeile = Preis, Kartenende "Reservieren"), Bewertung `mobilBewerten` (verwirft alles
+ausserhalb 50-105 % des Desktop-Preises), Bestaetigung per zweitem Abruf, Stream-Typ `mobile`,
+`summary.mobile`, Frontend zeigt eine Zeile "Deutschland · Smartphone" und einen Hinweis ohne
+VPN-Schritt. Handler- und Parser-Tests decken den Ablauf mit Stub und erfundener Fixture ab.
+
+**Parser am 24.09. gegen echte mobile Seiten geprueft** (Android-Kennung im Browser, deutsche
+Sitzung, zwei Berliner Hotels, 19 Tarifkarten, ohne Proxy). Ergebnis:
+
+1. Wortlaut passt: Anker "Preis fuer N Naechte:", Kartenende "Reservieren". ABER: Bei der Mobile
+   Rate stehen Streichpreis und Preis in EINER Zeile ("€ 246 € 188"), darunter "Originalpreis …
+   Aktueller Preis …". Die erste Fassung fand deshalb genau die Handy-Rabatte nie. Behoben, Fixture
+   mit echter Struktur (erfundene Namen) in test/parser-test.js.
+2. Steuern: Jede Karte sagt "Einschliesslich Steuern und Gebuehren". Mobil- und Desktop-Preis sind
+   direkt vergleichbar.
+3. Gegenprobe gleiches Zimmer, gleicher Tarif: Desktop 209 EUR, Handy 188 EUR (-10 %); mit
+   Fruehstueck 233 zu 210 (-9,9 %). Der Hebel ist real.
+
+Noch nicht geprueft: ob die Sitzung ueber den Proxy (headless Chromium, Android-Profil) dieselbe
+Mobile Rate bekommt wie ein echter Browser. Das zeigt erst Schritt 3.
+
+3. `MOBILE_CHECK=1` in Vercel setzen, fuenf Suchen, Spalte P ("Mobil ...") mit dem eigenen Handy
+   vergleichen. Stimmt es, Flag stehen lassen; die Datenschutzerklaerung braucht keine Aenderung
+   (gleicher Zweck, gleiche Daten).
+
+Danach denkbar: Mobil-Abruf auch im Siegerland (Mobile Rate + Landespreis kombiniert) und
+`MOBILE_READY = true`, damit auch der Nutzerwunsch "alle Laender mobil" moeglich wird.
 
 ## 9. Referrer-Experiment
 
