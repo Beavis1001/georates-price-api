@@ -290,15 +290,19 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   const sum = { success: true, baselineUsedEuro: 194.56, baselineSamples: [209.1, 209.1, 194.56], best: { country: 'IN', priceEuro: 187.38 } };
   const e = mobilBewerten({ country: 'DE', priceEuro: 209, priceLocal: 209, currency: 'EUR', samples: [188, 209], deals: ['mobile'] }, sum);
   const f = mobilBewerten({ country: 'DE', priceEuro: 188, currency: 'EUR', samples: [188, 188.5], deals: ['mobile'] }, sum);
-  const g = mobilBewerten({ country: 'DE', priceEuro: 300, currency: 'EUR', samples: [300, 188] }, sum);
+  const g = mobilBewerten({ country: 'DE', priceEuro: 400, currency: 'EUR', samples: [400, 188] }, sum);
   const faelle = [
     ['Schwankung: 209 nicht mehr als Lesefehler ausgeblendet', !e.implausible && e.priceEuro === 209 && e.priceLocal === 209],
     ['Schwankung: gemeldet, bester Handy-Preis 188', e.schwankt === true && e.bestSeenEuro === 188 && e.bestSeenSavingsPct === 3.4],
     ['Schwankung: vorsichtiger Preis ist kein Fund', e.relevant === false],
     ['stabil (188 / 188,50): keine Schwankung', f.schwankt === false && f.bestSeenEuro === null && f.relevant === true],
-    ['unplausible Einzelprobe (300) wird ignoriert, 188 zaehlt', !g.implausible && g.priceEuro === 188 && g.schwankt === false],
+    ['unplausible Einzelprobe (400, ueber 150 %) wird ignoriert, 188 zaehlt', !g.implausible && g.priceEuro === 188 && g.schwankt === false],
   ];
   for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | mobil '+n); }
+  // 24.09.2026, Rodos Park: Handy ohne Online-Zahlungs-Rabatt 107 % des Desktop-Preises - echter Preis.
+  const h = mobilBewerten({ country: 'DE', priceEuro: 2271, priceLocal: 2271, currency: 'EUR', samples: [2271] }, { success: true, baselineUsedEuro: 2117.6, baselineSamples: [2117.6, 2117.6], best: { country: 'US', priceEuro: 2075.7 } });
+  const ok3 = !h.implausible && h.priceEuro === 2271 && h.relevant === false && h.savingsPct === -7.2; if (!ok3) fehler++;
+  console.log((ok3?'OK  ':'FEHL')+' | mobil 107 % des Desktop-Preises: angezeigt, kein Fund'+(ok3?'':' -> '+JSON.stringify(h)));
 }
 
 // Hotelname aus dem Seitentitel (24.09.2026: "La1 4tzow" aus der Adresse). Namen erfunden.
