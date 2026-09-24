@@ -163,6 +163,11 @@ Einschalten, eine Handvoll Suchen fahren, Spalte Q und Status-MB vergleichen, da
 
 ## Geklaert, nicht mehr offen
 
+- **Permalinks ohne Booking-Link** (24.09.): `/api/result` lieferte an jeder Laenderzeile
+  `finalUrl` mit Reisedaten und Sitzungsparametern der Suche, obwohl die Startseite "ohne
+  Reisedaten, ohne Link" verspricht. `store.ohneLinks` entfernt die Adressfelder beim Speichern
+  und beim Lesen (alte Eintraege liegen bis zu 30 Tage). CDN-Cache der Antwort: bis 1 Stunde.
+
 - **Preisstreuung pro Sitzung** (21.09.): Booking wuerfelt nicht, es teilt zu (Mobile Rate,
   Online-Zahlungsrabatt, Kurzfristig-Deal, Genius, evtl. Partner-Kontext). Gegenmittel statt
   sechsfacher Abrufe: Ausgangsland doppelt (niedrigerer Preis gilt), Fund einmal bestaetigt

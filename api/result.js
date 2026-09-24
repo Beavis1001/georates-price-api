@@ -4,6 +4,8 @@
 // (lib/store.js). Wer den Link bekommt, sieht dieselbe Tabelle, ohne einen neuen Check und damit
 // neuen Proxy-Traffic auszuloesen. Gespeichert ist kein Booking-Link, nur Hotelname, Hotelland,
 // Zimmer, Verpflegung und die Laenderpreise.
+// Adressfelder (finalUrl u. a.) entfernt store.resultLesen, auch aus Eintraegen, die vor dem
+// 24.09.2026 noch mit Link gespeichert wurden.
 
 const store = require('../lib/store');
 const { setCors } = require('../lib/http');
