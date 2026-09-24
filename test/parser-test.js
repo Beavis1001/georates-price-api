@@ -301,5 +301,17 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | mobil '+n); }
 }
 
+// Hotelname aus dem Seitentitel (24.09.2026: "La1 4tzow" aus der Adresse). Namen erfunden.
+{
+  const { hotelNameAusTitel } = require('../lib/config');
+  const faelle = [
+    ['Titel: Umlaut bleibt', hotelNameAusTitel('Hotel Mühlenhof, Beispielstadt (aktualisierte Preise für 2027)') === 'Hotel Mühlenhof'],
+    ['Titel: Komma im Namen bleibt', hotelNameAusTitel('Haus Am See, Collection by Beispiel, Beispielstadt (aktualisierte Preise für 2027)') === 'Haus Am See, Collection by Beispiel'],
+    ['Titel: Suchseite ist kein Hotel', hotelNameAusTitel('Booking.com: Hotels in Beispielstadt, Beispielland') === ''],
+    ['Titel: ohne Ort -> leer (Adresse gilt)', hotelNameAusTitel('Just a moment...') === '' && hotelNameAusTitel('') === ''],
+  ];
+  for (const [n, ok] of faelle) { if(!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n); }
+}
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
