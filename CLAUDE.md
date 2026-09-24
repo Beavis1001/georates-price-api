@@ -67,6 +67,13 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
 - **Genius wird NICHT herausgerechnet** (seit 20.09.2026). Level 1 hat jedes kostenlose Konto, und das
   Herausrechnen erzeugte Scheinfunde, wenn Sitzungen den Rabatt unterschiedlich ausweisen. Der erkannte
   Betrag bleibt als `geniusRabatt` im Ergebnis. Nicht wieder einfuehren ohne neue Messung.
+  Betreiber-Entscheidung (24.09.2026): Buchen geht bei Booking nur mit Konto, also bekommt jeder
+  Bucher Genius; der Preis mit Genius ist der, den er wirklich zahlt. Die Startseite sagt das so.
+- **Permalinks und Best-of sind oeffentlich.** Die Startseite verlinkt beide. Dort darf nichts stehen,
+  was eine Suche wiedererkennbar macht: kein Booking-Link, keine Reisedaten, keine sid/aid/label.
+  `store.ohneLinks` entfernt Adressfelder (`finalUrl` u. a.) beim Speichern und beim Lesen eines
+  Permalinks. Bis zum 24.09.2026 stand `finalUrl` jeder Laenderzeile oeffentlich im Permalink. Neue
+  Felder mit Adressen in `LINK_FELDER` eintragen.
 - **Schwellen:** Unterschied ab 1 % = Fund, ab 10 % = VPN-Empfehlung. Musste der Bestpreis von uns
   umgerechnet werden (andere Waehrung als das Ausgangsland), gilt 3 % statt 1 %, weil Booking mit
   eigenem Kurs verkauft (`RELEVANT_SAVINGS_PCT_CONVERTED`).

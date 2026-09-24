@@ -179,6 +179,13 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
   ok('Fehlermeldung ohne Interna', r.body.success === false && r.body.reason === 'error' && !/smartproxy/.test(r.body.message), r.body.message);
 
+  // Permalink ist oeffentlich: keine Booking-Adresse, auch nicht verschachtelt (24.09.2026)
+  const store = require('../lib/store');
+  const mitLinks = { results: [{ country: 'DE', priceEuro: 100, finalUrl: LINK }], best: { country: 'DE', finalUrl: LINK }, hotelName: 'Beispiel' };
+  const bereinigt = store.ohneLinks(mitLinks);
+  ok('Permalink: finalUrl entfernt, Rest bleibt', !/booking\.com/.test(JSON.stringify(bereinigt)) && bereinigt.results[0].priceEuro === 100 && bereinigt.hotelName === 'Beispiel');
+  ok('Permalink: Eingabe bleibt unveraendert', mitLinks.results[0].finalUrl === LINK);
+
   const res = fakeRes();
   await handler({ method: 'GET', headers: {} }, res);
   ok('GET wird abgelehnt', res.statusCode === 405);
