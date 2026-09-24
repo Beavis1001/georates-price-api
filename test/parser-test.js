@@ -259,8 +259,10 @@ pruefeMobil('Echt: ohne Rabatt, Preis doppelt', mobilEcht,'Kleines Doppelzimmer'
 pruefeMobil('Echt: Mobile Rate in einer Zeile -> aktueller Preis', mobilEcht,'Kleines Doppelzimmer','egal','ja','281','mobile');
 pruefeMobil('Echt: Mobile Rate mit Tausenderpunkt', mobilEcht,'Kleines Doppelzimmer mit Hofblick','fruehstueck','ja','1.078','mobile');
 pruefeMobil('Echt: Namensanfang gleich, Zimmer nicht vermischt', mobilEcht,'Kleines Doppelzimmer mit Hofblick','egal','unsicher','1.078','mobile');
-// egal/unsicher nimmt wie am Desktop die ERSTE Karte, nicht die billigste (waehleStufe).
-pruefeMobil('Echt: egal/unsicher -> erste Karte (wie Desktop)', mobilEcht,'Kleines Doppelzimmer','egal','unsicher','312','online_payment');
+// egal/unsicher heisst "guenstigster" (24.09.2026): die Flexibel-Karte mit Mobile Rate (281)
+// schlaegt die Preiswert-Karte darueber (312), obwohl sie weiter unten steht.
+pruefeMobil('Echt: egal/unsicher -> guenstigste Karte', mobilEcht,'Kleines Doppelzimmer','egal','unsicher','281','mobile');
+pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger', mobilEcht,'Kleines Doppelzimmer','egal','nein','312','online_payment');
 {
   const [amt] = findRoomPrice(mobil,'Doppelzimmer mit Balkon','egal','unsicher');
   const ok = amt === null || amt === undefined; if(!ok) fehler++;
