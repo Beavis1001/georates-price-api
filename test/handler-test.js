@@ -189,6 +189,21 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   ok('Permalink: finalUrl entfernt, Rest bleibt', !/booking\.com/.test(JSON.stringify(bereinigt)) && bereinigt.results[0].priceEuro === 100 && bereinigt.hotelName === 'Beispiel');
   ok('Permalink: Eingabe bleibt unveraendert', mitLinks.results[0].finalUrl === LINK);
 
+  // Permalink ohne Nutzerpreis (24.09.2026): Die Kurz-ID ist fuer dieselbe Suche bei allen gleich,
+  // der eingetippte Preis des ersten Suchenden darf dort nicht landen.
+  stubBrowser.getLiveRates = async () => ({ EUR: 1, USD: 0.9, COP: 0.00022, JPY: 0.006 });
+  const gespeichert = [];
+  const origSpeichern = store.resultSpeichern;
+  store.resultSpeichern = async (id, payload) => { gespeichert.push(payload); };
+  r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher', userPrice: '950,00 €' });
+  store.resultSpeichern = origSpeichern;
+  ok('Antwort an den Suchenden rechnet mit seinem Preis', r.body.baselineUsedEuro === 950 && r.body.userPriceEuro === 950);
+  ok('Permalink gespeichert ohne Nutzerpreis, gegen eigenen Messwert', gespeichert.length === 1 && gespeichert[0].userPriceEuro == null && !gespeichert[0].userPriceDiffers && gespeichert[0].baselineUsedEuro === 1000, JSON.stringify({ u: gespeichert[0] && gespeichert[0].userPriceEuro, b: gespeichert[0] && gespeichert[0].baselineUsedEuro }));
+  const { ohneNutzerpreis } = require('../api/result');
+  const alt = ohneNutzerpreis({ success: true, baselineCountry: 'DE', userPriceEuro: 950, userPriceDiffers: true, baselineUsedEuro: 950,
+    results: [{ country: 'DE', priceEuro: 1000, currency: 'EUR' }, { country: 'CO', priceEuro: 890, currency: 'USD' }], confirmation: { done: true, stable: true } });
+  ok('alter Permalink: fremder Nutzerpreis entfernt, neu gerechnet', alt.userPriceEuro === undefined && alt.userPriceDiffers === undefined && alt.baselineUsedEuro === 1000 && alt.savingsPct === 11 && alt.confirmation.stable === true, JSON.stringify({ b: alt.baselineUsedEuro, s: alt.savingsPct }));
+
   const res = fakeRes();
   await handler({ method: 'GET', headers: {} }, res);
   ok('GET wird abgelehnt', res.statusCode === 405);
