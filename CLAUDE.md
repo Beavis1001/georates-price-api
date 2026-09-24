@@ -124,7 +124,7 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
   also 10 % unter ALLEN 16 Laendern, ohne VPN. Mit dem Flag laeuft das Ausgangsland einmal
   zusaetzlich mit `MOBILE_DEVICE` (android), geparst von `findRoomPriceMobile` (anderer Anker:
   "Preis fuer N Naechte:", letzte Betragszeile ist der Preis), bewertet von `mobilBewerten`
-  (verwirft alles ausserhalb 50-105 % des Desktop-Preises), einmal bestaetigt wie ein Landesfund,
+  (verwirft alles ausserhalb 50-150 % des Desktop-Preises; hoeher ist nie ein Fund), einmal bestaetigt wie ein Landesfund,
   Stream-Typ `mobile`, `summary.mobile`. Die Zeile steht NICHT in `results`: Laender gegen Laender,
   Geraet gegen Geraet. Der Mobil-Parser ist aus einem Screenshot abgeleitet und muss vor dem
   Einschalten mit einem Debug-Abruf (`device: 'android'`, `debugLines`) gegen die echte Seite
