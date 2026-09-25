@@ -14,6 +14,9 @@ const ANZAHL = 8;      // Eintraege in der Antwort
 // Upstash bleibt unangetastet (dort schreibt nur der Preis-Check).
 // A6b4UgmrL0KM: Gegenprobe des Betreibers fuer den Smartphone-Preis am 24.09.2026, kein Besucher.
 const AUSGEBLENDET = new Set(['A6b4UgmrL0KM']);
+// Suchen vor Einfuehrung des Gesamtzaehlers (25.09.2026), laut Log-Tabelle. Die Startseite zeigt
+// SUCHEN_BASIS + Zaehlerstand, damit der Zaehler nicht bei null anfaengt.
+const SUCHEN_BASIS = 212;
 
 module.exports = async (req, res) => {
   setCors(res, 'GET, OPTIONS');
@@ -34,5 +37,6 @@ module.exports = async (req, res) => {
 
   // Eine Stunde am Edge cachen: Die Liste aendert sich selten, die Startseite ruft sie oft ab.
   res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
-  res.status(200).json({ success: true, seit, eintraege: top, gesamt: alle.length });
+  const suchenGesamt = SUCHEN_BASIS + await store.suchenGesamt();
+  res.status(200).json({ success: true, seit, eintraege: top, gesamt: alle.length, suchenGesamt });
 };

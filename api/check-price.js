@@ -338,6 +338,7 @@ module.exports = async (req, res) => {
       streamSend({ type: 'meta', baselineCountry: cached.baselineCountry, fromCache: true, totalCountries: (cached.results || []).length });
       (cached.results || []).forEach((r) => streamSend({ type: 'country', result: r }));
     }
+    if (zusammenfassung && zusammenfassung.success) await store.sucheZaehlen();
     respond(200, { ...zusammenfassung, fromCache: true, resultId });
     return;
   }
@@ -673,6 +674,7 @@ module.exports = async (req, res) => {
         { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
     await store.tagesstatistikSchreiben({ erfolg: summary.success, fund: !!summary.relevantSaving, bytes: bytesGesamt });
+    if (summary.success) await store.sucheZaehlen();
     respond(200, payload);
   } catch (err) {
     try {

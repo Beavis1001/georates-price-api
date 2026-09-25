@@ -204,6 +204,19 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
     results: [{ country: 'DE', priceEuro: 1000, currency: 'EUR' }, { country: 'CO', priceEuro: 890, currency: 'USD' }], confirmation: { done: true, stable: true } });
   ok('alter Permalink: fremder Nutzerpreis entfernt, neu gerechnet', alt.userPriceEuro === undefined && alt.userPriceDiffers === undefined && alt.baselineUsedEuro === 1000 && alt.savingsPct === 11 && alt.confirmation.stable === true, JSON.stringify({ b: alt.baselineUsedEuro, s: alt.savingsPct }));
 
+  // Gesamtzaehler: jede Suche mit Ergebnis zaehlt einmal (25.09.2026)
+  let gezaehlt = 0;
+  const origZaehlen = store.sucheZaehlen;
+  store.sucheZaehlen = async () => { gezaehlt++; };
+  await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+  await call({ link: 'https://example.com/x', room: 'Doppelzimmer' });
+  store.sucheZaehlen = origZaehlen;
+  ok('Zaehler: erfolgreiche Suche zaehlt, ungueltiger Link nicht', gezaehlt === 1, gezaehlt);
+  const bestof = require('../api/best-of');
+  const bres = fakeRes();
+  await bestof({ method: 'GET', headers: {} }, bres);
+  ok('Best-of liefert suchenGesamt ab 212', bres.body && bres.body.suchenGesamt === 212, bres.body && bres.body.suchenGesamt);
+
   const res = fakeRes();
   await handler({ method: 'GET', headers: {} }, res);
   ok('GET wird abgelehnt', res.statusCode === 405);
