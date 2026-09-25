@@ -204,6 +204,22 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
     results: [{ country: 'DE', priceEuro: 1000, currency: 'EUR' }, { country: 'CO', priceEuro: 890, currency: 'USD' }], confirmation: { done: true, stable: true } });
   ok('alter Permalink: fremder Nutzerpreis entfernt, neu gerechnet', alt.userPriceEuro === undefined && alt.userPriceDiffers === undefined && alt.baselineUsedEuro === 1000 && alt.savingsPct === 11 && alt.confirmation.stable === true, JSON.stringify({ b: alt.baselineUsedEuro, s: alt.savingsPct }));
 
+  // Ausgangsland aus dem Herkunftsland des Besuchers (25.09.2026)
+  {
+    const cfg = require('../lib/config');
+    const faelle = [
+      ['FR', 'FR'], ['CH', 'CH'], ['GB', 'GB'], ['AT', 'AT'], ['UK', 'GB'], ['RE', 'FR'], ['TR', 'DE'], ['', 'DE'], ['XX', 'DE'],
+    ];
+    const falsch = faelle.filter(([ein, soll]) => cfg.ausgangslandFuerBesucher(ein, LINK) !== soll);
+    ok('Ausgangsland aus Herkunft: FR/CH/GB/AT, UK->GB, Reunion->FR, TR/leer/unbekannt->Link (DE)', !falsch.length, JSON.stringify(falsch));
+    r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' }, { 'x-vercel-ip-country': 'FR' });
+    ok('Besucher aus Frankreich: Ausgangsland FR, FR in der Laenderliste, DE weiter verglichen', r.body.baselineCountry === 'FR' && r.body.countries[0] === 'FR' && r.body.results.some((x) => x.country === 'FR') && r.body.results.some((x) => x.country === 'DE'), JSON.stringify(r.body.countries));
+    r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' }, { 'x-vercel-ip-country': 'DE' });
+    ok('Besucher aus Deutschland: wie bisher', r.body.baselineCountry === 'DE' && r.body.countries.length === 15);
+    r = await call({ mode: 'rooms', link: LINK }, { 'x-vercel-ip-country': 'CH' });
+    ok('Zimmer-Abruf nutzt ebenfalls das Herkunftsland', r.body.success === true && r.body.baselineCountry === 'CH');
+  }
+
   // Gesamtzaehler: jede Suche mit Ergebnis zaehlt einmal (25.09.2026)
   let gezaehlt = 0;
   const origZaehlen = store.sucheZaehlen;

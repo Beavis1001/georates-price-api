@@ -173,7 +173,7 @@ module.exports = async (req, res) => {
     let bytes = 0;
     try {
       await browser.chromiumVorbereiten();
-      const baselineCountry = cfg.detectBaselineCountry(link);
+      const baselineCountry = cfg.ausgangslandFuerBesucher(req.headers['x-vercel-ip-country'], link);
       // Reihenfolge beachten: erst Baseline aus dem Originallink lesen, dann auf Deutsch zwingen.
       const abrufLink = cfg.normalisiereLinkFuerAbruf(link);
 
@@ -313,13 +313,16 @@ module.exports = async (req, res) => {
   // ein Fremder koennte damit am Cache vorbei immer neue Abrufe ausloesen. Ohne Debug-Header gilt
   // deshalb das Standardprofil (Entscheidung vom 20.09.).
   const device = browser.resolveDevice(debug ? body.device : null, false);
-  const baselineCountry = cfg.detectBaselineCountry(link);
+  const baselineCountry = cfg.ausgangslandFuerBesucher(visitorCountry, link);
   // Laenderliste DIESER Suche - die 15 festen plus ggf. das Land der Unterkunft, optional vom
   // Nutzer eingeschraenkt.
   const laender = cfg.laenderFuerDieseSuche(link, eingabe.countries, baselineCountry);
   // Mit Smartphone-Abruf traegt das Ergebnis eine Zeile mehr - ein anderer Cache-Eintrag, sonst
   // liefert der Cache nach dem Einschalten 24 Stunden lang Ergebnisse ohne Smartphone-Zeile.
-  const cacheKey = store.cacheKeyFor(link, room, board, cancel, device + (MOBILE_CHECK ? '+mobil' : ''), laender);
+  // Das Ausgangsland gehoert in den Schluessel: Sonst bekaeme ein Besucher aus Frankreich ein
+  // Ergebnis aus dem Cache, das gegen Deutschland gerechnet wurde. Fuer DE bleibt der Schluessel
+  // wie bisher, damit bestehende Eintraege weiter gelten.
+  const cacheKey = store.cacheKeyFor(link, room, board, cancel, device + (MOBILE_CHECK ? '+mobil' : '') + (baselineCountry !== 'DE' ? '+b' + baselineCountry : ''), laender);
   const resultId = store.resultIdFor(cacheKey);
   const cached = await store.cacheGet(cacheKey);
   if (cached) {

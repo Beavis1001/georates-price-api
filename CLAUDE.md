@@ -82,6 +82,10 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
 - **"egal" heisst "guenstigster"** (Betreiber-Entscheidung 24.09.2026). `waehleStufe` nimmt innerhalb
   jeder Prioritaetsstufe den guenstigsten passenden Tarif, nicht den ersten auf der Seite. Gilt fuer
   Desktop und Mobil gleich, sonst vergleicht man verschiedene Tarife.
+- **Ausgangsland = Herkunftsland des Besuchers** (`x-vercel-ip-country`, seit 25.09.2026), ersatzweise
+  aus der Sprachendung des Links, sonst DE (`ausgangslandFuerBesucher`). Vorher wurden Besucher aus
+  FR/ES/IT/NL/UK/AT/CH gegen Deutschland verglichen. Nicht-Listen-Laender kommen vorn in die
+  Laenderliste; Tuerkei ausgenommen. Das Ausgangsland steht im Cache-Schluessel (fuer DE wie bisher).
 - **Belegung zaehlt** (24.09.2026). Vor jedem Tarif steht "max. Personenzahl: N" / "Nur fuer N Gast";
   Tarife fuer weniger Personen als `group_adults` im Link fliegen raus (`passendeBelegung`). Ohne
   das gewann bei "egal" der billigere Einzelbelegungs-Tarif. Die Tarifliste endet am naechsten
