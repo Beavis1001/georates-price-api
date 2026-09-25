@@ -33,7 +33,7 @@ module.exports = async (req, res) => {
     if (!proHotel.has(key) || proHotel.get(key).pct < e.pct) proHotel.set(key, e);
   }
   const top = [...proHotel.values()].sort((a, b) => b.pct - a.pct).slice(0, ANZAHL)
-    .map((e) => ({ hotel: e.hotel, hotelLand: e.hotelLand, land: e.land, baseline: e.baseline, pct: e.pct, euro: e.euro, datum: e.datum, resultId: e.resultId || null }));
+    .map((e) => ({ hotel: e.hotel, hotelLand: e.hotelLand, land: e.land, baseline: e.baseline, pct: e.pct, euro: e.euro, basisEuro: e.basisEuro != null ? e.basisEuro : null, datum: e.datum, resultId: e.resultId || null }));
 
   // Eine Stunde am Edge cachen: Die Liste aendert sich selten, die Startseite ruft sie oft ab.
   res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
