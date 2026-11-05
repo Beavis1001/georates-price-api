@@ -49,9 +49,32 @@ module.exports = async (req, res) => {
   const quote = s.anfragen ? s.erfolge / s.anfragen : null;
   const warnung = s.anfragen >= WARN_MIN_ANFRAGEN && quote !== null && quote < WARN_ERFOLGSQUOTE;
   const mb = Math.round(s.kb / 1024);
+
+  // Aufschluesselung nach Verursacher. Die Gesamtsumme allein sagt nicht, wo gespart werden kann:
+  // Zimmerlisten und Preis-Checks laufen beide ueber den bezahlten Proxy, haben aber voellig
+  // unterschiedlichen Wert. Ein Zimmerabruf ohne folgende Pruefung kostet Geld und bringt nichts.
+  const mbRooms = Math.round(s.kb_rooms / 1024);
+  const mbCheck = Math.round(s.kb_check / 1024);
+  // Durchschnitt pro bezahltem Abruf (Cache-Treffer kosten nichts und zaehlen hier nicht mit).
+  const mbProCheck = s.anfragen_check ? Math.round((s.kb_check / 1024 / s.anfragen_check) * 10) / 10 : null;
+  const mbProRoom = s.anfragen_rooms ? Math.round((s.kb_rooms / 1024 / s.anfragen_rooms) * 10) / 10 : null;
+  // Wie oft wurde eine Zimmerliste geladen, ohne dass daraus eine Pruefung wurde? Negative Werte
+  // sind moeglich (Pruefung ohne vorherigen Zimmerabruf, etwa ueber einen Permalink) und bleiben
+  // bewusst stehen, statt auf 0 geschoent zu werden.
+  const abbrueche = (s.anfragen_rooms + s.cache_rooms) - (s.anfragen_check + s.cache_check);
+  const anteilRooms = s.kb ? Math.round((s.kb_rooms / s.kb) * 100) : 0;
+
   const status = `${warnung ? 'WARNUNG ' : ''}TAGESBERICHT ${gestern}: ${s.anfragen} Anfragen, ${s.erfolge} mit Preis`
     + (quote !== null ? ` (${Math.round(quote * 100)} %)` : '') + `, ${s.funde} Funde, ${mb} MB Proxy`
-    + (store.DAILY_MB_LIMIT ? ` von ${store.DAILY_MB_LIMIT} MB Deckel` : '');
+    + (store.DAILY_MB_LIMIT ? ` von ${store.DAILY_MB_LIMIT} MB Deckel` : '')
+    + ` || Zimmerlisten: ${s.anfragen_rooms} geladen, ${mbRooms} MB`
+    + (mbProRoom !== null ? ` (${mbProRoom} MB/Abruf)` : '') + `, ${s.cache_rooms} aus Cache`
+    + ` || Preis-Checks: ${s.anfragen_check} gerechnet, ${mbCheck} MB`
+    + (mbProCheck !== null ? ` (${mbProCheck} MB/Check)` : '') + `, ${s.cache_check} aus Cache`
+    + ` || Zimmerlisten-Anteil am Traffic: ${anteilRooms} %, ohne folgende Pruefung: ${abbrueche}`;
   await store.logQuery({ ...LEERE_ZEILE, status });
-  res.status(200).json({ success: true, tag: gestern, ...s, mb, quote, warnung });
+  res.status(200).json({
+    success: true, tag: gestern, ...s, mb, quote, warnung,
+    mbRooms, mbCheck, mbProRoom, mbProCheck, anteilRooms, abbrueche,
+  });
 };
