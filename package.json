@@ -11,9 +11,10 @@
     "puppeteer-core": "22.15.0"
   },
   "scripts": {
-    "test": "node test/parser-test.js && node test/handler-test.js && node test/leck-check.js",
+    "test": "node test/parser-test.js && node test/handler-test.js && node test/hit-test.js && node test/leck-check.js",
     "test:parser": "node test/parser-test.js",
     "test:handler": "node test/handler-test.js",
+    "test:hit": "node test/hit-test.js",
     "test:leck": "node test/leck-check.js"
   }
 }
