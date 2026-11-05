@@ -172,10 +172,34 @@ module.exports = async (req, res) => {
     const link = eingabe.link;
     let bytes = 0;
     try {
-      await browser.chromiumVorbereiten();
       const baselineCountry = cfg.ausgangslandFuerBesucher(req.headers['x-vercel-ip-country'], link);
       // Reihenfolge beachten: erst Baseline aus dem Originallink lesen, dann auf Deutsch zwingen.
       const abrufLink = cfg.normalisiereLinkFuerAbruf(link);
+      const blockScripts = debug && !!body.noScripts;
+      const device = browser.resolveDevice(debug ? body.device : null, debug);
+
+      // Zimmerliste zwischenspeichern. Zimmernamen, Verpflegung und Storno eines Hotels aendern
+      // sich kaum, der Abruf kostet aber jedes Mal eine volle Booking-Seite ueber den bezahlten
+      // Proxy - und viele Besucher laden Zimmer, ohne danach eine Preispruefung zu starten.
+      // Ohne Cache zahlt jeder Aufruf desselben Hotels erneut. Am 5.11.2026 gingen so rund zwei
+      // Drittel des Tagestraffics fuer Zimmerlisten drauf.
+      // Im Debug-Modus nicht cachen, sonst messen Testlaeufe den Cache statt der Seite.
+      const roomsKey = store.cacheKeyFor(abrufLink, '__rooms__', '', '', device + '|' + baselineCountry, []);
+      if (!debug) {
+        const ausCache = await store.cacheGet(roomsKey);
+        if (ausCache && ausCache.rooms && ausCache.rooms.length) {
+          await store.cacheTrefferZaehlen('rooms');
+          res.status(200).json({
+            success: true,
+            rooms: ausCache.rooms,
+            baselineCountry: ausCache.baselineCountry || baselineCountry,
+            cached: true,
+          });
+          return;
+        }
+      }
+
+      await browser.chromiumVorbereiten();
 
       // Zimmer zuerst aus den DOM-Links der Zimmertabelle nehmen (r.rooms, inkl. Verpflegungs-/
       // Storno-Optionen); nur wenn leer, faellt es auf die Text-Heuristik (nur Namen) zurueck.
@@ -199,8 +223,6 @@ module.exports = async (req, res) => {
       // und einmal ohne Bookings JavaScript fahren, um Traffic-Ersparnis und Trefferquote zu
       // vergleichen. Geraeteprofile ebenso - der billigste Weg zu sehen, ob der Parser die
       // mobile Seitenstruktur ueberhaupt versteht.
-      const blockScripts = debug && !!body.noScripts;
-      const device = browser.resolveDevice(debug ? body.device : null, debug);
       for (let a = 1; a <= 2 && !withOpts; a++) {
         const r = await browser.attemptFetch(abrufLink, srv, proxyAuth, blockScripts, device);
         bytes += r.transferBytes || 0;
@@ -217,13 +239,14 @@ module.exports = async (req, res) => {
         if (r.loadedOk) { const rl = roomsFrom(r); if (rl.length) namesOnly = rl; }
       }
       const rooms = withOpts || namesOnly;
-      await store.tagesstatistikSchreiben({ erfolg: !!rooms, fund: false, bytes });
+      await store.tagesstatistikSchreiben({ erfolg: !!rooms, fund: false, bytes, art: 'rooms' });
       if (!rooms) {
         const failPayload = { success: false, reason: 'rooms_not_loaded' };
         if (debug && lastR) failPayload.dbg = { roomMeta: lastR.roomMeta, loadedOk: lastR.loadedOk, bodyLen: (lastR.bodyText || '').length };
         res.status(200).json(failPayload);
         return;
       }
+      if (!debug) await store.cacheSet(roomsKey, { rooms, baselineCountry });
       const payload = { success: true, rooms, baselineCountry };
       if (debug && lastR) {
         payload.dbg = { roomMeta: lastR.roomMeta, bodyLen: (lastR.bodyText || '').length, loadedOk: lastR.loadedOk, transferKB: Math.round((lastR.transferBytes || 0) / 1024) };
@@ -326,6 +349,7 @@ module.exports = async (req, res) => {
   const resultId = store.resultIdFor(cacheKey);
   const cached = await store.cacheGet(cacheKey);
   if (cached) {
+    await store.cacheTrefferZaehlen('check');
     await logAttempt('aus Cache');
     // Der Cache haelt die Laenderpreise ohne Nutzerpreis. Bringt der Nutzer einen mit, wird die
     // Zusammenfassung hier neu gerechnet - so bleibt derselbe Cache-Eintrag fuer alle nutzbar.
@@ -676,13 +700,13 @@ module.exports = async (req, res) => {
       await logAttempt(hatDatum ? 'kein Preis gefunden' : 'kein Preis gefunden (Link ohne Reisedaten)',
         { baselineLand: LOG_COUNTRY_LABEL[baselineCountry] || baselineCountry });
     }
-    await store.tagesstatistikSchreiben({ erfolg: summary.success, fund: !!summary.relevantSaving, bytes: bytesGesamt });
+    await store.tagesstatistikSchreiben({ erfolg: summary.success, fund: !!summary.relevantSaving, bytes: bytesGesamt, art: 'check' });
     if (summary.success) await store.sucheZaehlen();
     respond(200, payload);
   } catch (err) {
     try {
       await logAttempt('Fehler: ' + String((err && err.message) || err).slice(0, 120));
-      await store.tagesstatistikSchreiben({ erfolg: false, fund: false, bytes: results.reduce((s, r) => s + (r.transferBytes || 0), 0) });
+      await store.tagesstatistikSchreiben({ erfolg: false, fund: false, bytes: results.reduce((s, r) => s + (r.transferBytes || 0), 0), art: 'check' });
     } catch (e) { /* Logging ist optional */ }
     respond(200, fehlerAntwort(err));
   } finally {

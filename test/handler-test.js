@@ -177,6 +177,77 @@ const LINK = 'https://www.booking.com/hotel/de/beispiel.de.html?checkin=2027-03-
   r = await call({ mode: 'rooms', link: LINK, debug: true }, { 'x-georates-debug': 'geheim' });
   ok('rooms-Modus mit richtigem Secret: dbg vorhanden', r.body.dbg && typeof r.body.dbg.bodyLen === 'number');
 
+  // Zimmerliste aus dem Cache. Ohne diesen Cache kostete jeder Besucher desselben Hotels eine
+  // volle Booking-Seite ueber den bezahlten Proxy - am 5.11.2026 ging so der groessere Teil des
+  // Tagestraffics fuer Zimmerlisten drauf, ohne dass daraus eine Preispruefung wurde.
+  {
+    const store = require('../lib/store');
+    const origGet = store.cacheGet;
+    const origSet = store.cacheSet;
+    const speicher = new Map();
+    store.cacheGet = async (k) => (speicher.has(k) ? speicher.get(k) : null);
+    store.cacheSet = async (k, v) => { speicher.set(k, v); };
+    const origFetch = stubBrowser.attemptFetch;
+    let abrufe = 0;
+    stubBrowser.attemptFetch = async (...a) => { abrufe++; return origFetch(...a); };
+
+    await call({ mode: 'rooms', link: LINK });
+    const nachErstem = abrufe;
+    const zweit = await call({ mode: 'rooms', link: LINK });
+    ok('rooms: erster Aufruf laedt die Seite', nachErstem > 0, nachErstem);
+    ok('rooms: zweiter Aufruf ohne Seitenabruf', abrufe === nachErstem, `${abrufe} statt ${nachErstem}`);
+    ok('rooms: zweiter Aufruf als cached markiert', zweit.body.cached === true);
+    ok('rooms: Cache liefert dieselben Zimmer', zweit.body.rooms && zweit.body.rooms[0].name === 'Doppelzimmer');
+
+    // Debug-Laeufe muessen am Cache vorbei, sonst messen sie ihn statt der Seite.
+    const vorDebug = abrufe;
+    await call({ mode: 'rooms', link: LINK, debug: true }, { 'x-georates-debug': 'geheim' });
+    ok('rooms: Debug-Lauf umgeht den Cache', abrufe > vorDebug);
+
+    stubBrowser.attemptFetch = origFetch;
+    store.cacheGet = origGet;
+    store.cacheSet = origSet;
+  }
+
+  // Buchhaltung des Traffics. Ohne die Trennung nach "art" zeigte der Tagesbericht nur eine
+  // Summe und man konnte nicht erkennen, wo gespart werden muss. Wichtigste Regel hier:
+  // Cache-Treffer kosten nichts und duerfen deshalb NICHT auf Anfragen und MB gebucht werden,
+  // sonst verbrauchen sie den Tagesdeckel (siehe CLAUDE.md).
+  {
+    const store = require('../lib/store');
+    const origGet = store.cacheGet;
+    const origSet = store.cacheSet;
+    const origStat = store.tagesstatistikSchreiben;
+    const origTreffer = store.cacheTrefferZaehlen;
+    const speicher = new Map();
+    const gebucht = [];
+    const treffer = [];
+    store.cacheGet = async (k) => (speicher.has(k) ? speicher.get(k) : null);
+    store.cacheSet = async (k, v) => { speicher.set(k, v); };
+    store.tagesstatistikSchreiben = async (o) => { gebucht.push(o); };
+    store.cacheTrefferZaehlen = async (a) => { treffer.push(a); };
+
+    await call({ mode: 'rooms', link: LINK });
+    ok('Buchhaltung: Zimmerabruf wird als rooms gebucht',
+      gebucht.length === 1 && gebucht[0].art === 'rooms', JSON.stringify(gebucht[0]));
+
+    gebucht.length = 0;
+    await call({ mode: 'rooms', link: LINK });
+    ok('Buchhaltung: Zimmer-Cache-Treffer zaehlt als Treffer', treffer.includes('rooms'));
+    ok('Buchhaltung: Zimmer-Cache-Treffer belastet den Deckel nicht', gebucht.length === 0, gebucht.length);
+
+    gebucht.length = 0;
+    await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
+    ok('Buchhaltung: Preis-Check wird als check gebucht',
+      gebucht.length === 1 && gebucht[0].art === 'check', JSON.stringify(gebucht[0]));
+    ok('Buchhaltung: Preis-Check bucht Bytes', gebucht[0] && gebucht[0].bytes > 0, gebucht[0] && gebucht[0].bytes);
+
+    store.cacheGet = origGet;
+    store.cacheSet = origSet;
+    store.tagesstatistikSchreiben = origStat;
+    store.cacheTrefferZaehlen = origTreffer;
+  }
+
   // Fehler in der Browser-Schicht -> generische Meldung, keine Interna
   stubBrowser.getLiveRates = async () => { throw new Error('proxy.smartproxy.net:3120 ECONNREFUSED'); };
   r = await call({ link: LINK, room: 'Doppelzimmer', board: 'egal', cancel: 'unsicher' });
