@@ -109,6 +109,19 @@ den Endpunkt gegen Booking zu testen; dafuer braucht es Vercel und den Proxy-Acc
 - **Kostenschutz in dieser Reihenfolge:** Turnstile (entfaellt mit gueltigem Debug-Header) ->
   Eingabepruefung -> Cache -> Zaehlbremse pro IP -> Tagesdeckel (Suchen und MB) -> Proxy. Cache-Treffer
   kosten nichts und zaehlen nicht.
+- **Auch der Modus `rooms` wird gecacht** (seit 05.11.2026). Vorher lud jeder Besucher desselben
+  Hotels eine volle Booking-Seite ueber den bezahlten Proxy, und viele laden Zimmer, ohne danach
+  eine Preispruefung zu starten - am 05.11. ging so der groessere Teil des Tagestraffics fuer
+  Zimmerlisten drauf, bei nur rund zwoelf echten Preispruefungen. Schluessel ist der bereinigte
+  Link plus Geraet und Ausgangsland, Haltbarkeit wie beim Preis-Cache. Debug-Laeufe gehen bewusst
+  daran vorbei, sonst messen sie den Cache statt der Seite. Gesichert in `test/handler-test.js`.
+- **Der Tagesbericht trennt nach Verursacher** (seit 05.11.2026): Zimmerlisten und Preis-Checks
+  werden getrennt gezaehlt (`anfragen_rooms`/`anfragen_check`, `kb_rooms`/`kb_check`), dazu
+  Cache-Treffer je Art (`cache_rooms`/`cache_check`) und daraus abgeleitet MB pro Abruf, der
+  Zimmerlisten-Anteil am Traffic und die Zahl der Zimmerabrufe ohne folgende Pruefung. Vorher gab
+  es nur eine Gesamtsumme, und wo gespart werden muss, liess sich nur durch Gegenrechnen mit den
+  Vercel-Zahlen erraten. **Cache-Treffer werden bewusst nicht auf Anfragen und MB gebucht** - sie
+  duerfen den Tagesdeckel nicht verbrauchen; ein Test haelt das fest.
 - **Upstash-Variablen** heissen je nach Anlageweg `KV_REST_API_*` (Vercel Marketplace) oder
   `UPSTASH_REDIS_REST_*` (von Hand). Beide werden akzeptiert. Fehlen beide, laufen Cache, Bremsen und
   Best-of stumm ins Leere; genau das ist vom 16. bis 20.09.2026 passiert. Der Tagesbericht warnt jetzt.
