@@ -64,6 +64,19 @@ module.exports = async (req, res) => {
   const abbrueche = (s.anfragen_rooms + s.cache_rooms) - (s.anfragen_check + s.cache_check);
   const anteilRooms = s.kb ? Math.round((s.kb_rooms / s.kb) * 100) : 0;
 
+  // Reichweite. Die Preis-Check-Zahlen oben sagen nichts darueber, wie viele Menschen die Seite
+  // ueberhaupt gesehen haben - wer einen Ratgeber liest und geht, taucht dort nicht auf. Seit
+  // dem 05.11.2026 zaehlt /api/hit das mit, cookiefrei (lib/store.js).
+  const b = await store.besucherTag(gestern);
+  const topLand = Object.entries(b.laender).sort((x, y) => y[1] - x[1]).slice(0, 3)
+    .map(([k, v]) => `${k} ${v}`).join(', ') || 'keine';
+  const topQuelle = Object.entries(b.quellen).sort((x, y) => y[1] - x[1]).slice(0, 3)
+    .map(([k, v]) => `${k} ${v}`).join(', ') || 'nur Direktaufrufe';
+  const topSeite = Object.entries(b.seiten).sort((x, y) => y[1] - x[1]).slice(0, 3)
+    .map(([k, v]) => `${k} ${v}`).join(', ') || 'keine';
+  const monat = gestern.slice(0, 7);
+  const besuchImMonat = await store.besucherImMonat(monat);
+
   const status = `${warnung ? 'WARNUNG ' : ''}TAGESBERICHT ${gestern}: ${s.anfragen} Anfragen, ${s.erfolge} mit Preis`
     + (quote !== null ? ` (${Math.round(quote * 100)} %)` : '') + `, ${s.funde} Funde, ${mb} MB Proxy`
     + (store.DAILY_MB_LIMIT ? ` von ${store.DAILY_MB_LIMIT} MB Deckel` : '')
@@ -71,10 +84,15 @@ module.exports = async (req, res) => {
     + (mbProRoom !== null ? ` (${mbProRoom} MB/Abruf)` : '') + `, ${s.cache_rooms} aus Cache`
     + ` || Preis-Checks: ${s.anfragen_check} gerechnet, ${mbCheck} MB`
     + (mbProCheck !== null ? ` (${mbProCheck} MB/Check)` : '') + `, ${s.cache_check} aus Cache`
-    + ` || Zimmerlisten-Anteil am Traffic: ${anteilRooms} %, ohne folgende Pruefung: ${abbrueche}`;
+    + ` || Zimmerlisten-Anteil am Traffic: ${anteilRooms} %, ohne folgende Pruefung: ${abbrueche}`
+    + ` || Reichweite: ${b.besucher} Besucher, ${b.aufrufe} Seitenaufrufe`
+    + ` (Monat ${monat}: ${besuchImMonat} Besucher)`
+    + ` || Laender: ${topLand} || Seiten: ${topSeite} || Verweise: ${topQuelle}`;
   await store.logQuery({ ...LEERE_ZEILE, status });
   res.status(200).json({
     success: true, tag: gestern, ...s, mb, quote, warnung,
     mbRooms, mbCheck, mbProRoom, mbProCheck, anteilRooms, abbrueche,
+    besucher: b.besucher, aufrufe: b.aufrufe, laender: b.laender, seiten: b.seiten, quellen: b.quellen,
+    monat, besucherImMonat: besuchImMonat,
   });
 };
