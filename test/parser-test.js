@@ -439,5 +439,30 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
 }
 
 
+// Suchkontext aus dem Abruf-Link entfernen (11.11.2026).
+//
+// Booking liefert je nach Suchkontext unterschiedliche Seiten aus. Eine aus der Ergebnisliste
+// kopierte Adresse (do_availability_check, hp_avform, highlighted_hotels, ss ...) ergab fuer ein
+// Hotel auf Mauritius bei jedem Zimmer nur "Nur Uebernachtung", dieselbe Suche mit der kurzen
+// Hoteladresse alle vier Verpflegungsarten. Genau die lange Adresse kopieren aber die Besucher.
+{
+  const lang = 'https://www.booking.com/hotel/xx/beispiel.html?ssne=Ort&highlighted_hotels=1&ss=Ort&dest_id=900&dest_type=city&hp_avform=1&origin=hp&do_availability_check=1&sb=1&src=hotel&checkin=2026-12-13&checkout=2026-12-19&group_adults=2&no_rooms=1&group_children=0#availability_target'; // leck-check-ok: erfundenes Hotel, erfundener Zeitraum
+  const kurz = 'https://www.booking.com/hotel/xx/beispiel.html?group_children=0&no_rooms=1&group_adults=2&checkout=2026-12-19&checkin=2026-12-13'; // leck-check-ok: erfundenes Hotel, erfundener Zeitraum
+  const mitKindern = 'https://www.booking.com/hotel/xx/beispiel.html?checkin=2027-01-01&checkout=2027-01-05&group_adults=2&group_children=2&age=5&age=9&no_rooms=1&srpvid=abc&efdco=1'; // leck-check-ok: erfundenes Hotel, erfundener Zeitraum
+  const a = normalisiereLinkFuerAbruf(lang);
+  const b = normalisiereLinkFuerAbruf(kurz);
+  const k = normalisiereLinkFuerAbruf(mitKindern);
+  const faelle = [
+    ['Suchkontext ist weg', !/do_availability_check|hp_avform|highlighted_hotels|ssne|origin=|src=/.test(a), a],
+    ['Anker ist weg', !a.includes('#'), a],
+    ['Reisezeitraum bleibt', a.includes('checkin=2026-12-13') && a.includes('checkout=2026-12-19'), a],
+    ['Belegung bleibt', a.includes('group_adults=2') && a.includes('no_rooms=1'), a],
+    ['lange und kurze Adresse ergeben denselben Abruf-Link', a === b, a + ' !== ' + b],
+    ['Alter der Kinder bleibt vollstaendig', (k.match(/age=/g) || []).length === 2, k],
+  ];
+  for (const [n, ok, info] of faelle) { if (!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n+(ok?'':'  -> '+info)); }
+}
+
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
