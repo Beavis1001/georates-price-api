@@ -191,7 +191,9 @@ module.exports = async (req, res) => {
       // Nur die Zimmerlisten verfallen, nicht die teuren Preis-Ergebnisse.
       // v2: Scheineintraege nehmen Zimmern nicht mehr die Verpflegung (11.11.2026).
       // v3: Text- und DOM-Verpflegung werden vereint statt ueberschrieben (11.11.2026).
-      const ROOMS_CACHE_VERSION = '__rooms__v3';
+      // v4: Tabellen-Layout - Verpflegung vor dem Preis (11.11.2026). Das Auswahlfeld bot
+      //     dort je Zimmer die Verpflegung der jeweils naechsten Tarifstufe an.
+      const ROOMS_CACHE_VERSION = '__rooms__v4';
       const roomsKey = store.cacheKeyFor(abrufLink, ROOMS_CACHE_VERSION, '', '', device + '|' + baselineCountry, []);
       if (!debug) {
         const ausCache = await store.cacheGet(roomsKey);

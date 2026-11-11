@@ -370,9 +370,10 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
 // Abschnitt eines Zimmers nur bis zum naechsten Zimmernamen reicht, bekam der Scheineintrag
 // saemtliche Tarifstufen des echten Zimmers - und damit dessen Verpflegungsarten.
 {
-  // Reihenfolge wie in test/seite-genius.txt und auf echten Booking-Seiten: erst der Preis,
-  // dann die Steuerzeile, danach Verpflegung und Storno. Andersherum gebaut verschiebt sich
-  // die Zuordnung um eine Stufe - der Test selbst waere dann falsch, nicht der Parser.
+  // Reihenfolge wie in test/seite-genius.txt: erst der Preis, dann die Steuerzeile, danach
+  // Verpflegung und Storno. Das ist das Karten-Layout. Booking hat auch ein Tabellen-Layout
+  // mit umgekehrter Reihenfolge (test/seite-tabelle.txt, Test ganz unten) - beide muessen
+  // funktionieren. Wer hier die Reihenfolge vertauscht, prueft das jeweils andere Layout.
   const tarif = (preis, verpflegung) => ['Belegung: 2 Erwachsene', 'Gesamt', '€ ' + preis,
     'Einschließlich Steuern und Gebühren', verpflegung,
     'Kostenlose Stornierung vor dem 13. November 2026', 'Zimmer auswählen'];
@@ -463,6 +464,46 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   for (const [n, ok, info] of faelle) { if (!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n+(ok?'':'  -> '+info)); }
 }
 
+
+// --- 11.11.2026: Tabellen-Layout, Verpflegung steht VOR dem Preis ------------------------
+// Echter Seitenausschnitt (test/seite-tabelle.txt), Hotel- und Zimmernamen unveraendert, weil
+// es keine Besuchersuche ist, sondern eine oeffentliche Hotelseite ohne Personenbezug.
+//
+// Booking hat zwei Layouts. Im Karten-Layout (seite-genius.txt) steht die Verpflegung UNTER
+// dem Preis, im Tabellen-Layout DARUEBER, weil die Spalte "Ihre Optionen" links vom Preis
+// liegt. Der Parser las nur nach unten und erwischte deshalb die Verpflegung der naechsten
+// Stufe: Die Abfrage "Halbpension" lieferte 1.807 EUR (das ist der Fruehstueckstarif), die
+// Halbpension zu 2.429 EUR blieb unsichtbar. Aufgefallen ist es, weil der Mobil-Parser
+// dieselbe Seite richtig las - er hatte den Versatz nie.
+{
+  const bt = fs.readFileSync(require('path').join(__dirname, 'seite-tabelle.txt'), 'utf8');
+  const ZIMMER = 'Junior Suite (nur für Erwachsene)';
+  const faelle = [
+    ['Tabellen-Layout: Fruehstueck',   'fruehstueck',  '1.807'],
+    ['Tabellen-Layout: Halbpension',   'halbpension',  '2.429'],
+    ['Tabellen-Layout: All-Inclusive', 'allinclusive', '3.361'],
+    // "egal" heisst guenstigster passender Tarif - hier der Fruehstueckstarif des Zimmers.
+    ['Tabellen-Layout: egal',          'egal',         '1.807'],
+  ];
+  for (const [name, board, soll] of faelle) {
+    const [amt, , , , storno, erkannt] = findRoomPrice(bt, ZIMMER, board, 'ja', { adults: 2 });
+    const ok = String(amt) === soll && (board === 'egal' || erkannt === board) && storno === 'ja';
+    if (!ok) fehler++;
+    console.log((ok?'OK  ':'FEHL')+' | '+name.padEnd(44)+' Betrag '+String(amt).padEnd(9)+' erkannt '+String(erkannt));
+  }
+  // Das Partnerangebot des ANDEREN Zimmers (1.547) darf nicht hereinrutschen.
+  const [p] = findRoomPrice(bt, 'Junior Suite mit Meerblick', 'egal', 'ja', { adults: 2 });
+  const okP = String(p) === '1.547';
+  if (!okP) fehler++;
+  console.log((okP?'OK  ':'FEHL')+' | '+'Tabellen-Layout: Nachbarzimmer bleibt getrennt'.padEnd(44)+' Betrag '+String(p));
+
+  // Das Auswahlfeld muss dieselben Tarife anbieten, die der Parser auch findet.
+  const opts = computeRoomOptions(bt, [ZIMMER]);
+  const boards = (opts[ZIMMER] || {}).boards || [];
+  const okB = ['fruehstueck','halbpension','allinclusive'].every((b) => boards.includes(b));
+  if (!okB) fehler++;
+  console.log((okB?'OK  ':'FEHL')+' | '+'Tabellen-Layout: Dropdown bietet alle drei an'.padEnd(44)+' '+JSON.stringify(boards));
+}
 
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
