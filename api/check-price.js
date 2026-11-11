@@ -190,7 +190,8 @@ module.exports = async (req, res) => {
       // als haette sie nicht gewirkt. Genau das ist am 11.11.2026 passiert.
       // Nur die Zimmerlisten verfallen, nicht die teuren Preis-Ergebnisse.
       // v2: Scheineintraege nehmen Zimmern nicht mehr die Verpflegung (11.11.2026).
-      const ROOMS_CACHE_VERSION = '__rooms__v2';
+      // v3: Text- und DOM-Verpflegung werden vereint statt ueberschrieben (11.11.2026).
+      const ROOMS_CACHE_VERSION = '__rooms__v3';
       const roomsKey = store.cacheKeyFor(abrufLink, ROOMS_CACHE_VERSION, '', '', device + '|' + baselineCountry, []);
       if (!debug) {
         const ausCache = await store.cacheGet(roomsKey);

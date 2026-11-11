@@ -415,5 +415,29 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   }
 }
 
+// Text- und DOM-Erkennung werden vereint, nicht gegeneinander ausgespielt (11.11.2026).
+//
+// Findet die Textauswertung auf einer Seite keinen Verpflegungshinweis, trug sie je Tarifstufe
+// "Nur Uebernachtung" ein - und diese eine Angabe verdraengte die vollstaendigere Liste aus dem
+// Seitenquelltext. Auf einem Hotel auf Mauritius verschwand so sogar das Fruehstueck.
+{
+  const { enrichRoomOptions } = require('../lib/parser');
+  const tarif = (preis) => ['Belegung: 2 Erwachsene', 'Gesamt', '€ ' + preis,
+    'Einschließlich Steuern und Gebühren', 'Zimmer auswählen'];
+  // Seite ohne jeden Verpflegungshinweis - die Textauswertung kann nur "uebernachtung" liefern.
+  const seite = ['Zimmerkategorie', 'Deluxe Gartenzimmer', '32 m²',
+    ...tarif('1.584'), ...tarif('1.719'), 'Ende'].join('\n');
+  const ausDom = [{ name: 'Deluxe Gartenzimmer', boards: ['fruehstueck', 'allinclusive'], cancels: ['ja'] }];
+  const r = enrichRoomOptions(seite, ausDom)[0];
+  const faelle = [
+    ['Fruehstueck aus dem Quelltext bleibt erhalten', r.boards.includes('fruehstueck'), JSON.stringify(r.boards)],
+    ['All-Inclusive aus dem Quelltext bleibt erhalten', r.boards.includes('allinclusive'), JSON.stringify(r.boards)],
+    ['Nur Uebernachtung aus dem Text kommt dazu', r.boards.includes('uebernachtung'), JSON.stringify(r.boards)],
+    ['keine doppelten Eintraege', r.boards.length === new Set(r.boards).size, JSON.stringify(r.boards)],
+  ];
+  for (const [n, ok, info] of faelle) { if (!ok) fehler++; console.log((ok?'OK  ':'FEHL')+' | '+n+(ok?'':'  -> '+info)); }
+}
+
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
