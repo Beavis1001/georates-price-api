@@ -184,7 +184,14 @@ module.exports = async (req, res) => {
       // Ohne Cache zahlt jeder Aufruf desselben Hotels erneut. Am 5.11.2026 gingen so rund zwei
       // Drittel des Tagestraffics fuer Zimmerlisten drauf.
       // Im Debug-Modus nicht cachen, sonst messen Testlaeufe den Cache statt der Seite.
-      const roomsKey = store.cacheKeyFor(abrufLink, '__rooms__', '', '', device + '|' + baselineCountry, []);
+      // Die Versionsnummer gehoert in den Schluessel. Aendert sich, WIE Zimmer und ihre
+      // Verpflegungsarten erkannt werden, muessen alte Listen verfallen - sonst liefert der
+      // Cache bis zu 24 Stunden lang weiter das alte Ergebnis, und die Korrektur sieht aus,
+      // als haette sie nicht gewirkt. Genau das ist am 11.11.2026 passiert.
+      // Nur die Zimmerlisten verfallen, nicht die teuren Preis-Ergebnisse.
+      // v2: Scheineintraege nehmen Zimmern nicht mehr die Verpflegung (11.11.2026).
+      const ROOMS_CACHE_VERSION = '__rooms__v2';
+      const roomsKey = store.cacheKeyFor(abrufLink, ROOMS_CACHE_VERSION, '', '', device + '|' + baselineCountry, []);
       if (!debug) {
         const ausCache = await store.cacheGet(roomsKey);
         if (ausCache && ausCache.rooms && ausCache.rooms.length) {
