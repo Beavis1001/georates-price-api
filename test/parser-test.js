@@ -362,5 +362,58 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   console.log((ok?'OK  ':'FEHL')+' | Genius-Hinweis -> Plakette genius_hint statt deal'+(ok?'':' -> '+JSON.stringify(r)));
 }
 
+// Scheineintraege duerfen einem echten Zimmer nicht die Verpflegung wegnehmen (11.11.2026).
+//
+// Aufgefallen an einem Hotel auf Mauritius: Booking zeigte fuenf Verpflegungsvarianten, das
+// Formular bot zwei an. Grund war nicht die Verpflegungserkennung, sondern die Zimmerliste.
+// Zeilen wie "Eigenes Badezimmer" oder "Zimmer auswaehlen" galten als Zimmername; weil der
+// Abschnitt eines Zimmers nur bis zum naechsten Zimmernamen reicht, bekam der Scheineintrag
+// saemtliche Tarifstufen des echten Zimmers - und damit dessen Verpflegungsarten.
+{
+  // Reihenfolge wie in test/seite-genius.txt und auf echten Booking-Seiten: erst der Preis,
+  // dann die Steuerzeile, danach Verpflegung und Storno. Andersherum gebaut verschiebt sich
+  // die Zuordnung um eine Stufe - der Test selbst waere dann falsch, nicht der Parser.
+  const tarif = (preis, verpflegung) => ['Belegung: 2 Erwachsene', 'Gesamt', '€ ' + preis,
+    'Einschließlich Steuern und Gebühren', verpflegung,
+    'Kostenlose Stornierung vor dem 13. November 2026', 'Zimmer auswählen'];
+  const seite = [
+    'Zimmerkategorie',
+    'Deluxe Gartenzimmer',          // echtes Zimmer
+    '32 m²',
+    'Eigenes Badezimmer',           // Ausstattung - steht bei JEDEM Zimmer
+    ...tarif('1.584', 'Hervorragendes Frühstück inbegriffen'),
+    ...tarif('1.719', 'Frühstück & Abendessen inbegriffen'),
+    ...tarif('2.034', 'Frühstück, Mittagessen & Abendessen inbegriffen'),
+    ...tarif('2.268', 'All-Inclusive'),
+    'Deluxe Meerblickzimmer',       // echtes Zimmer
+    '32 m²',
+    'Eigenes Badezimmer',
+    ...tarif('1.900', 'Hervorragendes Frühstück inbegriffen'),
+    ...tarif('2.400', 'All-Inclusive'),
+    'Ambre Resort',                 // Hotelname, kein Zimmer
+    'Ende',
+  ].join('\n');
+
+  const namen = ['Deluxe Gartenzimmer', 'Eigenes Badezimmer', 'Zimmer auswählen',
+    'Deluxe Meerblickzimmer', 'Ambre Resort'];
+  const opt = computeRoomOptions(seite, namen);
+  const garten = (opt['Deluxe Gartenzimmer'] || {}).boards || [];
+  const meer = (opt['Deluxe Meerblickzimmer'] || {}).boards || [];
+  const faelle = [
+    ['Gartenzimmer behaelt alle vier Verpflegungsarten',
+      ['fruehstueck', 'halbpension', 'vollpension', 'allinclusive'].every((b) => garten.includes(b)),
+      JSON.stringify(garten)],
+    ['Meerblickzimmer: Fruehstueck und All-Inclusive',
+      meer.includes('fruehstueck') && meer.includes('allinclusive'), JSON.stringify(meer)],
+    ['Ausstattungszeile "Eigenes Badezimmer" faellt raus', !opt['Eigenes Badezimmer']],
+    ['Bedienelement "Zimmer auswählen" faellt raus', !opt['Zimmer auswählen']],
+    ['Hotelname ohne Tarife faellt raus', !opt['Ambre Resort']],
+  ];
+  for (const [n, ok, info] of faelle) {
+    if (!ok) fehler++;
+    console.log((ok ? 'OK  ' : 'FEHL') + ' | ' + n + (ok ? '' : '  -> ' + info));
+  }
+}
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
