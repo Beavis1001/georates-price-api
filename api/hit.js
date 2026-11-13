@@ -9,7 +9,10 @@
 // Was NICHT gespeichert wird: IP, Browserkennung, Verweildauer, Klickpfad, Wiedererkennung
 // ueber den Tag hinaus. Die Tageskennung ist ein gesalzener Hash aus IP und Browserkennung,
 // der um Mitternacht wertlos wird (lib/store.js). Gespeichert bleiben je Tag: Zahl der
-// Aufrufe, Zahl der Einzelbesucher, Land, Seite, verweisende Domain.
+// Aufrufe, Zahl der Einzelbesucher, Land, Seite, verweisende Domain - und seit dem
+// 13.11.2026 dieselben Zahlen noch einmal nur fuer Aufrufe, die aus einem echten Browser
+// kamen (siehe wirktMenschlich unten). Gespeichert wird dadurch nichts Zusaetzliches ueber
+// einen Besucher, nur eine zweite Zaehlung derselben Ereignisse.
 //
 // Dieser Endpunkt beruehrt den Tagesdeckel NICHT. Der schuetzt vor Proxy-Kosten; ein
 // Seitenaufruf kostet keinen Proxy-Traffic, und ein ausgeschoepftes Suchbudget darf nicht
@@ -22,6 +25,32 @@ const { setCors, clientIp } = require('../lib/http');
 // und die ueblichen Vorschau-Abrufe von Messengern. Getarnte Bots bleiben drin - dagegen hilft
 // nichts, was den Aufwand wert waere.
 const BOT = /bot|crawl|spider|slurp|facebookexternalhit|embedly|preview|headless|lighthouse|pingdom|uptime|curl|wget|python-requests|node-fetch|monitor/i;
+
+// Getarnte Bots: zaehlen mit, aber getrennt (seit 13.11.2026).
+//
+// Anlass: Am 07.11.2026 meldete der Zaehler 24 Besucher mit je genau einer Seite, fast alle
+// aus den USA, keiner mit Verweis. Das ist das Muster automatisierter Abrufe - nur mit einer
+// Browserkennung, die unauffaellig aussieht und deshalb durch die Liste oben faellt. Mit
+// solchen Zahlen laesst sich nichts anfangen: weder einschaetzen, ob eine Veroeffentlichung
+// etwas gebracht hat, noch einem Partner die Reichweite nennen.
+//
+// Zwei Kopfzeilen trennen das zuverlaessig und kosten nichts:
+//
+//   Origin          Der Zaehler laeuft auf einer anderen Domain als die Seite. Bei so einem
+//                   Abruf schickt jeder Browser die Herkunft mit - ein Skript, das die
+//                   Adresse einfach nachbaut, in aller Regel nicht.
+//   Accept-Language Schickt jeder Browser, auch bei Hintergrundabrufen. Einfache
+//                   HTTP-Werkzeuge lassen sie weg.
+//
+// Im Zweifel gilt ein Aufruf als menschlich. Lieber ein Bot zu viel in der Menschenzahl als
+// ein echter Besucher zu wenig - die Gesamtzahl steht ohnehin unveraendert daneben, es geht
+// also nichts verloren, was sich spaeter anders bewerten laesst.
+const EIGENE_HERKUNFT = /^https:\/\/(www\.)?georates\.tech$/;
+function wirktMenschlich(req) {
+  if (!EIGENE_HERKUNFT.test(String(req.headers.origin || ''))) return false;
+  if (!String(req.headers['accept-language'] || '').trim()) return false;
+  return true;
+}
 
 const MAX_SEITE = 60;
 const MAX_QUELLE = 50;
@@ -71,7 +100,7 @@ module.exports = async (req, res) => {
     const datum = new Date().toISOString().slice(0, 10);
     const kennung = store.besucherKennung(clientIp(req), ua, datum);
 
-    await store.besuchZaehlen({ land, seite, quelle, kennung, datum });
+    await store.besuchZaehlen({ land, seite, quelle, kennung, datum, menschlich: wirktMenschlich(req) });
   } catch (e) {
     console.error('[hit] Zaehlen fehlgeschlagen:', (e && e.message) || e);
   }
