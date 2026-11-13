@@ -75,7 +75,14 @@ module.exports = async (req, res) => {
   const topSeite = Object.entries(b.seiten).sort((x, y) => y[1] - x[1]).slice(0, 3)
     .map(([k, v]) => `${k} ${v}`).join(', ') || 'keine';
   const monat = gestern.slice(0, 7);
-  const besuchImMonat = await store.besucherImMonat(monat);
+  const [besuchImMonat, besuchImMonatMensch] = await Promise.all([
+    store.besucherImMonat(monat),
+    store.besucherImMonat(monat, true),
+  ]);
+  // Beide Zahlen nennen, nie nur eine. Die Gesamtzahl allein ist wertlos (am 07.11. waren von
+  // 24 Besuchern vermutlich fast alle Maschinen), die Menschenzahl allein waere eine
+  // Schaetzung, die niemand mehr nachpruefen kann.
+  const menschen = `${b.menschlich.besucher} Besucher, ${b.menschlich.aufrufe} Seitenaufrufe`;
 
   const status = `${warnung ? 'WARNUNG ' : ''}TAGESBERICHT ${gestern}: ${s.anfragen} Anfragen, ${s.erfolge} mit Preis`
     + (quote !== null ? ` (${Math.round(quote * 100)} %)` : '') + `, ${s.funde} Funde, ${mb} MB Proxy`
@@ -85,14 +92,17 @@ module.exports = async (req, res) => {
     + ` || Preis-Checks: ${s.anfragen_check} gerechnet, ${mbCheck} MB`
     + (mbProCheck !== null ? ` (${mbProCheck} MB/Check)` : '') + `, ${s.cache_check} aus Cache`
     + ` || Zimmerlisten-Anteil am Traffic: ${anteilRooms} %, ohne folgende Pruefung: ${abbrueche}`
-    + ` || Reichweite: ${b.besucher} Besucher, ${b.aufrufe} Seitenaufrufe`
+    + ` || Reichweite gesamt: ${b.besucher} Besucher, ${b.aufrufe} Seitenaufrufe`
     + ` (Monat ${monat}: ${besuchImMonat} Besucher)`
+    + ` || davon echter Browser: ${menschen}`
+    + ` (Monat ${monat}: ${besuchImMonatMensch} Besucher)`
     + ` || Laender: ${topLand} || Seiten: ${topSeite} || Verweise: ${topQuelle}`;
   await store.logQuery({ ...LEERE_ZEILE, status });
   res.status(200).json({
     success: true, tag: gestern, ...s, mb, quote, warnung,
     mbRooms, mbCheck, mbProRoom, mbProCheck, anteilRooms, abbrueche,
     besucher: b.besucher, aufrufe: b.aufrufe, laender: b.laender, seiten: b.seiten, quellen: b.quellen,
-    monat, besucherImMonat: besuchImMonat,
+    menschlich: b.menschlich,
+    monat, besucherImMonat: besuchImMonat, besucherImMonatMenschlich: besuchImMonatMensch,
   });
 };

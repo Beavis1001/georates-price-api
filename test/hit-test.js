@@ -51,7 +51,14 @@ function kommandos() {
 
 const IP = '203.0.113.47';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131';
-const KOPF = { 'user-agent': UA, 'x-forwarded-for': IP + ', 10.0.0.1', 'x-vercel-ip-country': 'DE' };
+// Ein echter Browser schickt beim Abruf einer fremden Domain Origin und Accept-Language mit.
+const KOPF = {
+  'user-agent': UA,
+  'x-forwarded-for': IP + ', 10.0.0.1',
+  'x-vercel-ip-country': 'DE',
+  origin: 'https://georates.tech',
+  'accept-language': 'de-DE,de;q=0.9',
+};
 
 (async () => {
   // ---- Grundfall -------------------------------------------------------------------------
@@ -110,6 +117,32 @@ const KOPF = { 'user-agent': UA, 'x-forwarded-for': IP + ', 10.0.0.1', 'x-vercel
     ok('Bot zaehlt nicht mit: ' + bot.split('/')[0], r.statusCode === 204 && anfragen.length === 0, anfragen.length);
   }
 
+  // ---- Getarnte Bots: zaehlen mit, aber getrennt (13.11.2026) -----------------------------
+  // Die Bot-Liste faengt nur, wer sich zu erkennen gibt. Ein Skript mit unauffaelliger
+  // Browserkennung faellt durch - erkennbar aber daran, dass Origin oder Accept-Language
+  // fehlen. Entscheidend ist hier: Die Gesamtzahl bleibt in JEDEM Fall unveraendert.
+  const ohne = (weg) => { const k = { ...KOPF }; delete k[weg]; return k; };
+  const faelleBot = [
+    ['ohne Origin (Skript baut die Adresse nach)', ohne('origin')],
+    ['ohne Accept-Language', ohne('accept-language')],
+    ['mit fremdem Origin', { ...KOPF, origin: 'https://beispiel.invalid' }],
+    ['mit aehnlich aussehendem Origin', { ...KOPF, origin: 'https://georates.tech.boese.invalid' }],
+  ];
+  for (const [name, kopf] of faelleBot) {
+    await treffer({ p: '/' }, kopf);
+    const k = kommandos();
+    const gesamtGezaehlt = k.some((c) => c.endsWith('alle 1'));
+    const alsMensch = k.some((c) => c.endsWith('menschlich 1')) || k.some((c) => c.includes(':ids:mensch'));
+    ok('verdaechtig, zaehlt aber mit: ' + name, gesamtGezaehlt && !alsMensch, JSON.stringify(k));
+  }
+  await treffer({ p: '/' }, KOPF);
+  let km = kommandos();
+  ok('echter Browser zaehlt zusaetzlich als Mensch',
+    km.some((c) => c.endsWith('menschlich 1')) && km.some((c) => c.includes(':ids:mensch')), JSON.stringify(km));
+  await treffer({ p: '/' }, { ...KOPF, origin: 'https://www.georates.tech' });
+  ok('www-Schreibweise gilt auch als echter Browser',
+    kommandos().some((c) => c.endsWith('menschlich 1')), JSON.stringify(kommandos()));
+
   // ---- Methoden --------------------------------------------------------------------------
   r = await treffer({}, KOPF, 'OPTIONS');
   ok('OPTIONS wird beantwortet (CORS-Vorabfrage)', r.statusCode === 200);
@@ -128,9 +161,12 @@ const KOPF = { 'user-agent': UA, 'x-forwarded-for': IP + ', 10.0.0.1', 'x-vercel
   // ---- Auslesen --------------------------------------------------------------------------
   // Upstash liefert HGETALL je nach Weg als Objekt oder als flache Liste. Beides muss gehen,
   // sonst steht im Tagesbericht stillschweigend ueberall null.
-  ANTWORT = { result: ['alle', '42', 'land:DE', '30', 'land:AT', '12', 'seite:/', '20', 'quelle:t.co', '5'] };
+  ANTWORT = { result: ['alle', '42', 'menschlich', '9', 'land:DE', '30', 'land:AT', '12', 'seite:/', '20', 'quelle:t.co', '5'] };
   let tag = await store.besucherTag('2026-11-04');
   ok('Auslesen als flache Liste', tag.aufrufe === 42 && tag.laender.DE === 30 && tag.laender.AT === 12 && tag.seiten['/'] === 20 && tag.quellen['t.co'] === 5, JSON.stringify(tag));
+  ok('menschliche Aufrufe werden getrennt gelesen', tag.menschlich.aufrufe === 9, JSON.stringify(tag.menschlich));
+  ok('"menschlich" landet nicht faelschlich unter Seiten oder Laendern',
+    !('menschlich' in tag.seiten) && !('menschlich' in tag.laender), JSON.stringify(tag));
   ANTWORT = { result: { alle: '7', 'land:ES': '7' } };
   tag = await store.besucherTag('2026-11-04');
   ok('Auslesen als Objekt', tag.aufrufe === 7 && tag.laender.ES === 7, JSON.stringify(tag));
