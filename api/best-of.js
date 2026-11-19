@@ -13,11 +13,16 @@ const ANZAHL = 8;      // Eintraege in der Antwort
 // Eintraege, die keine echten Besucher-Funde sind, per Ergebnis-ID ausblenden. Die Liste in
 // Upstash bleibt unangetastet (dort schreibt nur der Preis-Check).
 // A6b4UgmrL0KM: Gegenprobe des Betreibers fuer den Smartphone-Preis am 24.09.2026, kein Besucher.
-// bI7CkzV9diLP: Hyatt House New York/Chelsea, 19.11.2026, gemeldet mit -14,9 % / 437 EUR. Das war
-//   kein Fund, sondern der Steuer-Lesefehler vor v11: Booking schrieb "plus INR 43.906,76 Steuern"
-//   ohne "und Gebuehren", das alte Muster traf nicht, gelesen wurde nur der Nettopreis. Die
-//   Nachmessung nach dem Fix ergab 2.924,51 EUR gegen 2.925,00 EUR in Deutschland - 49 Cent.
-const AUSGEBLENDET = new Set(['A6b4UgmrL0KM', 'bI7CkzV9diLP']);
+const AUSGEBLENDET = new Set(['A6b4UgmrL0KM']);
+// Ganze Hotels ausblenden (hotelLand|hotel), wenn eine Nachmessung gezeigt hat, dass die
+// gespeicherten Funde Messfehler waren. Per Ergebnis-ID reicht hier nicht: ein Hotel kann an
+// einem Tag mehrfach geprueft worden sein, dann rueckt nach dem Ausblenden einfach der
+// naechstbeste Fehltreffer nach.
+// US|Hyatt House New York/Chelsea: alle Funde (19.11.2026, bis -14,9 % / 437 EUR) stammen aus dem
+//   Steuer-Lesefehler vor v11. Booking schrieb dort "plus INR 43.906,76 Steuern" ohne "und
+//   Gebuehren", das alte Muster traf nicht, gelesen wurde nur der Nettopreis. Die Nachmessung nach
+//   dem Fix ergab 2.924,51 EUR gegen 2.925,00 EUR in Deutschland - 49 Cent ueber 15 Laender.
+const HOTEL_AUSGEBLENDET = new Set(['US|Hyatt House New York/Chelsea']);
 // Suchen vor Einfuehrung des Gesamtzaehlers (25.09.2026), laut Log-Tabelle. Die Startseite zeigt
 // SUCHEN_BASIS + Zaehlerstand, damit der Zaehler nicht bei null anfaengt.
 const SUCHEN_BASIS = 212;
@@ -34,6 +39,7 @@ module.exports = async (req, res) => {
   for (const e of alle) {
     if (!e || !e.datum || e.datum < seit || !(e.pct > 0) || AUSGEBLENDET.has(e.resultId)) continue;
     const key = `${e.hotelLand}|${e.hotel}`;
+    if (HOTEL_AUSGEBLENDET.has(key)) continue;
     if (!proHotel.has(key) || proHotel.get(key).pct < e.pct) proHotel.set(key, e);
   }
   const top = [...proHotel.values()].sort((a, b) => b.pct - a.pct).slice(0, ANZAHL)
