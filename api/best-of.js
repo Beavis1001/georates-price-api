@@ -13,7 +13,11 @@ const ANZAHL = 8;      // Eintraege in der Antwort
 // Eintraege, die keine echten Besucher-Funde sind, per Ergebnis-ID ausblenden. Die Liste in
 // Upstash bleibt unangetastet (dort schreibt nur der Preis-Check).
 // A6b4UgmrL0KM: Gegenprobe des Betreibers fuer den Smartphone-Preis am 24.09.2026, kein Besucher.
-const AUSGEBLENDET = new Set(['A6b4UgmrL0KM']);
+// bI7CkzV9diLP: Hyatt House New York/Chelsea, 19.11.2026, gemeldet mit -14,9 % / 437 EUR. Das war
+//   kein Fund, sondern der Steuer-Lesefehler vor v11: Booking schrieb "plus INR 43.906,76 Steuern"
+//   ohne "und Gebuehren", das alte Muster traf nicht, gelesen wurde nur der Nettopreis. Die
+//   Nachmessung nach dem Fix ergab 2.924,51 EUR gegen 2.925,00 EUR in Deutschland - 49 Cent.
+const AUSGEBLENDET = new Set(['A6b4UgmrL0KM', 'bI7CkzV9diLP']);
 // Suchen vor Einfuehrung des Gesamtzaehlers (25.09.2026), laut Log-Tabelle. Die Startseite zeigt
 // SUCHEN_BASIS + Zaehlerstand, damit der Zaehler nicht bei null anfaengt.
 const SUCHEN_BASIS = 212;
