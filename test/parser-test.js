@@ -505,5 +505,34 @@ pruefeMobil('Echt: Storno "nein" bleibt Preiswert, auch wenn Flexibel billiger',
   console.log((okB?'OK  ':'FEHL')+' | '+'Tabellen-Layout: Dropdown bietet alle drei an'.padEnd(44)+' '+JSON.stringify(boards));
 }
 
+// --- 19.11.2026: "plus ... Steuern" ohne "und Gebuehren" -----------------------------------
+// Der teuerste Fehler bisher. Hyatt House New York/Chelsea, 11.-23.01.2027, indische Sitzung:
+// Booking schrieb "Preis ₹ 255.859,19" und darunter "plus ₹ 43.906,76 Steuern". Das Muster
+// verlangte woertlich "Steuern und Geb...", traf nicht, und gelesen wurde nur der Nettopreis.
+// Folge: elf Laender lagen scheinbar 14,7 % unter Deutschland, das Tool empfahl Mexiko. Mit
+// Steuern sind es 2.924,52 EUR gegen 2.925,00 EUR - 48 Cent statt 428 Euro.
+//
+// Die beiden Prozent-Faelle muessen null liefern: Die gehoeren zu extractExclusiveTaxPct.
+// Wuerde "13 %" hier als absoluter Betrag durchgehen, waere der Fehler nur umgedreht.
+{
+  const { extractAbsoluteExtraTax } = require('../lib/parser');
+  const faelle = [
+    ['New York, indische Sitzung (der Anlassfall)', 'plus ₹ 43.906,76 Steuern', 43906.76],
+    ['Aegypten, alter Fall bleibt erhalten', 'plus EGP 954 Steuern und Gebühren', 954],
+    ['andere Einleitung, Waehrung vor dem Betrag', 'zzgl. 12,50 € Steuern', 12.5],
+    ['Waehrung hinter dem Betrag', 'plus 1.234,50 USD Steuern und Abgaben', 1234.5],
+    ['Prozentsatz greift NICHT', 'Nicht inbegriffen: 13 % Mehrwertsteuer, € 15 Umweltabgabe pro Nacht', null],
+    ['Prozentsatz greift NICHT (kurz)', 'plus 5 % Steuern', null],
+    ['inklusive - nichts aufschlagen', 'Einschließlich Steuern und Gebühren', null],
+    ['reine Preiszeile', 'Preis € 1.523', null],
+  ];
+  for (const [name, text, soll] of faelle) {
+    const ist = extractAbsoluteExtraTax(text);
+    const ok = soll === null ? ist === null : (ist !== null && Math.abs(ist - soll) < 0.005);
+    if (!ok) fehler++;
+    console.log((ok ? 'OK  ' : 'FEHL') + ' | ' + ('Zusatzsteuer: ' + name).padEnd(44) + ' -> ' + String(ist));
+  }
+}
+
 console.log(fehler? '\n'+fehler+' FEHLER' : '\nalle Tests bestanden');
 process.exit(fehler?1:0);
